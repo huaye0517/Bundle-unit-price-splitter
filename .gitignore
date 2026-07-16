@@ -1,0 +1,20 @@
+# Build outputs and temporary files
+outputs/
+work/
+__pycache__/
+*.py[cod]
+
+# User spreadsheets and packaged binaries
+*.xlsx
+*.xls
+*.xlsm
+*.exe
+
+# Local Codex metadata
+.agents/
+.codex/
+
+# IDE files
+.vs/
+*.user
+*.suo
