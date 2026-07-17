@@ -205,11 +205,11 @@ internal sealed class SplitterForm : Form
             if (!result.ContainsKey("status") || result["status"] != "ok") throw new Exception(Decode(result.ContainsKey("message_b64") ? result["message_b64"] : ""));
             int orders = ParseInt(result, "orders"), matched = ParseInt(result, "matched_rows"), unmatched = ParseInt(result, "unmatched_rows"), exceptional = ParseInt(result, "exceptional_orders");
             outputPath = Decode(result["output_path_b64"]);
-            statusLabel.Text = string.Format("完成：{0} 个订单，{1} 行匹配，{2} 行清零", orders, matched, unmatched);
-            balanceLabel.Text = exceptional == 0 ? string.Format("核对通过 · 订单 {0}  匹配 {1}  未匹配 {2}", orders, matched, unmatched) : string.Format("有 {0} 个异常订单 · 其拆分列已填 0", exceptional);
+            statusLabel.Text = string.Format("完成：{0} 个网店订单，{1} 行匹配，{2} 行未匹配", orders, matched, unmatched);
+            balanceLabel.Text = exceptional == 0 ? string.Format("核对通过 · 网店订单 {0}  匹配 {1}  普通商品 {2}", orders, matched, unmatched) : string.Format("有 {0} 个异常订单 · 其拆分列已填 0", exceptional);
             progressBar.Value = 100;
             succeeded = true;
-            var message = string.Format("结果已保存：\n{0}\n\n订单：{1}\n匹配行：{2}\n未匹配清零：{3}\n异常订单：{4}\n\n是否打开结果所在文件夹？", outputPath, orders, matched, unmatched, exceptional);
+            var message = string.Format("结果已保存：\n{0}\n\n网店订单：{1}\n匹配行：{2}\n未匹配普通商品：{3}\n异常订单：{4}\n\n是否打开结果所在文件夹？", outputPath, orders, matched, unmatched, exceptional);
             if (MessageBox.Show(message, "拆分完成", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) Process.Start("explorer.exe", "/select,\"" + outputPath + "\"");
         } catch (Exception ex) { progressBar.Value = 0; balanceLabel.Text = "核对未通过 · 未生成结果文件"; statusLabel.Text = "生成失败，请按提示检查文件"; MessageBox.Show(ex.Message, "无法生成拆分表", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { if (!succeeded) progressBar.Value = 0; generateButton.Enabled = true; }

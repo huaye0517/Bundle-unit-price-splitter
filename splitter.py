@@ -80,11 +80,15 @@ def _find_sheet(workbook, required: set[str], preferred: str | None = None):
         candidates.remove(workbook[preferred])
         candidates.insert(0, workbook[preferred])
 
+    matches = []
     for sheet in candidates:
         for row_number in range(1, min(sheet.max_row, 5) + 1):
             headers = {_text(sheet.cell(row_number, col).value) for col in range(1, sheet.max_column + 1)}
             if required.issubset(headers):
-                return sheet, row_number
+                matches.append((sheet, row_number))
+                break
+    if matches:
+        return max(matches, key=lambda match: (match[0].title == preferred, match[0].max_row))
     return None, None
 
 
@@ -247,22 +251,29 @@ def _calculate_rows(
 ) -> SplitStats:
     headers = _header_map(sheet, header_row)
     # These columns are unchanged by insertions because they all sit at or before Z.
-    required = {"订单编号", "应收合计", "货品编号", "数量"}
+    required = {"订单编号", "网店订单号", "应收合计", "货品编号", "数量", "金额"}
     missing = required.difference(headers)
     if missing:
         raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
 
     order_col = headers["订单编号"]
+    web_order_col = headers["网店订单号"]
     total_col = headers["应收合计"]
     item_col = headers["货品编号"]
     quantity_col = headers["数量"]
+    original_amount_col = max(
+        col
+        for col in range(1, sheet.max_column + 1)
+        if _text(sheet.cell(header_row, col).value) == "金额"
+    )
 
     groups: OrderedDict[str, list[int]] = OrderedDict()
     for row in range(header_row + 1, sheet.max_row + 1):
         if all(sheet.cell(row, col).value is None for col in range(1, 27)):
             continue
         order_number = _text(sheet.cell(row, order_col).value)
-        key = order_number or f"__ROW_{row}"
+        web_order_number = _text(sheet.cell(row, web_order_col).value)
+        key = web_order_number or order_number or f"__ROW_{row}"
         groups.setdefault(key, []).append(row)
 
     stats = SplitStats(orders=len(groups), rows=sum(len(rows) for rows in groups.values()))
@@ -281,22 +292,19 @@ def _calculate_rows(
                 stats.unmatched_rows += 1
 
         total_price = sum(row_prices.values())
-        if abs(total_price) < 1e-15:
-            invalid_reason = "没有可分摊的匹配单价"
-
         quantities: dict[int, float] = {}
-        order_totals: dict[int, float] = {}
-        if invalid_reason is None:
+        original_amounts: dict[int, float] = {}
+        try:
             for row in rows:
-                try:
+                amount_value = sheet.cell(row, original_amount_col).value
+                original_amounts[row] = 0.0 if _text(amount_value) == "" else _number(amount_value, f"第 {row} 行原金额")
+                if row_prices[row] != 0:
                     quantities[row] = _number(sheet.cell(row, quantity_col).value, f"第 {row} 行数量")
-                    order_totals[row] = _number(sheet.cell(row, total_col).value, f"第 {row} 行应收合计")
-                    if row_prices[row] != 0 and quantities[row] == 0:
+                    if quantities[row] == 0:
                         invalid_reason = f"第 {row} 行匹配成功但数量为 0"
                         break
-                except ValueError as exc:
-                    invalid_reason = str(exc)
-                    break
+        except ValueError as exc:
+            invalid_reason = str(exc)
 
         if invalid_reason is not None:
             stats.exceptional_orders += 1
@@ -308,6 +316,74 @@ def _calculate_rows(
                 order_progress(order_index, total_orders)
             continue
 
+        order_totals: list[float] = []
+        try:
+            for row in rows:
+                total_value = sheet.cell(row, total_col).value
+                if _text(total_value) != "":
+                    order_totals.append(_number(total_value, f"第 {row} 行应收合计"))
+        except ValueError as exc:
+            invalid_reason = str(exc)
+
+        if not order_totals:
+            invalid_reason = "应收合计为空"
+        elif any(abs(value - order_totals[0]) > 1e-9 for value in order_totals[1:]):
+            invalid_reason = "同一网店订单存在多个不同的应收合计"
+
+        if invalid_reason is not None:
+            stats.exceptional_orders += 1
+            display_order = order_number.replace("__ROW_", "第 ")
+            stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
+            for row in rows:
+                _zero_targets(sheet, row)
+            if order_progress:
+                order_progress(order_index, total_orders)
+            continue
+
+        target_total = order_totals[0]
+
+        if abs(total_price) < 1e-15:
+            original_total = sum(original_amounts.values())
+            if abs(original_total) < 1e-15:
+                invalid_reason = "整单未匹配且原金额合计为 0，无法分摊应收合计"
+            else:
+                try:
+                    for row in rows:
+                        quantities[row] = _number(sheet.cell(row, quantity_col).value, f"第 {row} 行数量")
+                        if quantities[row] == 0:
+                            invalid_reason = f"第 {row} 行数量为 0"
+                            break
+                except ValueError as exc:
+                    invalid_reason = str(exc)
+
+            if invalid_reason is not None:
+                stats.exceptional_orders += 1
+                display_order = order_number.replace("__ROW_", "第 ")
+                stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
+                for row in rows:
+                    _zero_targets(sheet, row)
+                if order_progress:
+                    order_progress(order_index, total_orders)
+                continue
+
+            allocated_total = 0.0
+            for row_index, row in enumerate(rows):
+                ad = (
+                    target_total - allocated_total
+                    if row_index == len(rows) - 1
+                    else target_total * original_amounts[row] / original_total
+                )
+                allocated_total += ad
+                ac = ad / quantities[row]
+                sheet.cell(row, 27, 0.0)
+                sheet.cell(row, 28, 0.0)
+                sheet.cell(row, 29, ac)
+                sheet.cell(row, 30, ad)
+                sheet.cell(row, 34, ad)
+            if order_progress:
+                order_progress(order_index, total_orders)
+            continue
+
         for row in rows:
             aa = row_prices[row]
             if aa == 0:
@@ -315,7 +391,7 @@ def _calculate_rows(
                 continue
             quantity = quantities[row]
             ab = aa / total_price / quantity
-            ac = order_totals[row] * ab
+            ac = target_total * ab
             ad = ac * quantity
             sheet.cell(row, 27, aa)
             sheet.cell(row, 28, ab)

@@ -34,11 +34,11 @@ def make_sales(path: Path) -> None:
     ws.title = "销售明细"
     ws.append(SALES_HEADERS)
     base = [""] * len(SALES_HEADERS)
-    for code, qty in [("MISS", 1), ("SKU1", 1), ("SKU2", 2)]:
+    for index, (code, qty) in enumerate([("MISS", 1), ("SKU1", 1), ("SKU2", 2)]):
         row = base.copy()
         row[1] = "ORDER-1"
         row[10] = "WEB-1"
-        row[13] = 200
+        row[13] = 200 if index == 0 else None
         row[21] = code
         row[24] = qty
         row[25] = 10
@@ -83,7 +83,7 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(wb["其他工作表"]["A1"].value, "保留")
             wb.close()
 
-    def test_all_unmatched_order_is_zero_and_warned(self):
+    def test_all_unmatched_order_allocates_receivable_by_original_amount(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
@@ -96,12 +96,68 @@ class SplitterTests(unittest.TestCase):
             wb.save(sales)
             wb.close()
             stats = process_workbooks(ratio, sales, output)
-            self.assertEqual(stats.exceptional_orders, 1)
-            self.assertTrue(stats.warnings)
+            self.assertEqual(stats.exceptional_orders, 0)
+            self.assertFalse(stats.warnings)
             result = load_workbook(output, data_only=True)["拆分结果"]
             for row in range(2, 5):
                 self.assertEqual(result.cell(row, 27).value, 0)
-                self.assertEqual(result.cell(row, 34).value, 0)
+                self.assertEqual(result.cell(row, 29).value, 50)
+            self.assertEqual(result.cell(2, 34).value, 50)
+            self.assertEqual(result.cell(3, 34).value, 50)
+            self.assertEqual(result.cell(4, 34).value, 100)
+            self.assertEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 200)
+
+    def test_web_orders_are_balanced_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            wb = load_workbook(sales)
+            ws = wb["销售明细"]
+            ws["K2"] = "WEB-A"
+            ws["K3"] = "WEB-A"
+            ws["K4"] = "WEB-B"
+            ws["N2"] = 50
+            ws["N3"] = None
+            ws["N4"] = 80
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output)
+            self.assertEqual(stats.orders, 2)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertAlmostEqual(result["AD2"].value + result["AD3"].value, 50, places=12)
+            self.assertAlmostEqual(result["AD4"].value, 80, places=12)
+
+    def test_uses_sales_sheet_with_most_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            wb = load_workbook(sales)
+            source = wb["销售明细"]
+            corrected = wb.copy_worksheet(source)
+            corrected.title = "销售明细修正版"
+            row = [""] * len(SALES_HEADERS)
+            row[1] = "ORDER-2"
+            row[10] = "WEB-2"
+            row[13] = 30
+            row[21] = "SKU1"
+            row[24] = 1
+            row[25] = 30
+            row[28] = 30
+            corrected.append(row)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output)
+            self.assertEqual(stats.orders, 2)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertEqual(result.max_row, 5)
+            self.assertEqual(result["K5"].value, "WEB-2")
+            self.assertAlmostEqual(result["AD5"].value, 30, places=12)
 
     def test_source_files_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
