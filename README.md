@@ -27,6 +27,6 @@ python splitter_worker.py 占比表.xlsx 销售单.xlsx 输出.xlsx
 .\build.ps1
 ```
 
-打包完成后，程序位于 `outputs\BundleUnitPriceSplitter_v9.exe`，可直接复制到其他 Windows 电脑运行。
+打包完成后，程序位于 `outputs\组合装单价拆分工具.exe`，可直接复制到其他 Windows 电脑运行。
 
 如需指定打包使用的 Python，可先设置 `BUNDLE_SPLITTER_PYTHON` 环境变量。真实样例回归测试可通过 `BUNDLE_SPLITTER_RATIO_SAMPLE` 和 `BUNDLE_SPLITTER_SALES_SAMPLE` 指定本机文件，不会把业务表上传到仓库。
