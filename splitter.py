@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
+import shutil
 from typing import Callable, Iterable
 
 from openpyxl import load_workbook
@@ -28,6 +30,14 @@ class SplitStats:
     exceptional_orders: int = 0
     warnings: list[str] = field(default_factory=list)
     output_path: str = ""
+
+
+@dataclass
+class RatioUpdateStats:
+    mode: str
+    added_rows: int
+    source_rows: int
+    unique_items: int
 
 
 SALES_HEADERS = {
@@ -104,6 +114,14 @@ def _header_map(sheet, header_row: int) -> dict[str, int]:
     return result
 
 
+def _ratio_sheet_info(workbook):
+    for required, code_header, price_header, preferred in RATIO_SCHEMAS:
+        sheet, header_row = _find_sheet(workbook, required, preferred)
+        if sheet is not None:
+            return sheet, header_row, code_header, price_header
+    return None, None, "", ""
+
+
 def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float], int]:
     path = Path(ratio_path)
     if path.suffix.lower() != ".xlsx":
@@ -116,16 +134,7 @@ def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float],
         raise SplitterError(f"无法打开组合装拆分占比表：{exc}") from exc
 
     try:
-        value_sheet = None
-        header_row = None
-        code_header = ""
-        price_header = ""
-        for required, candidate_code_header, candidate_price_header, preferred in RATIO_SCHEMAS:
-            value_sheet, header_row = _find_sheet(values_book, required, preferred)
-            if value_sheet is not None:
-                code_header = candidate_code_header
-                price_header = candidate_price_header
-                break
+        value_sheet, header_row, code_header, price_header = _ratio_sheet_info(values_book)
         if value_sheet is None:
             raise SplitterError(
                 "占比表中未找到可识别的工作表。支持旧版“单品编号、金额、分摊比例、单价”，"
@@ -176,6 +185,109 @@ def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float],
     finally:
         values_book.close()
         formulas_book.close()
+
+
+def ratio_file_info(ratio_path: str | Path) -> tuple[int, int]:
+    prices, source_rows = _load_ratio_prices(ratio_path)
+    return len(prices), source_rows
+
+
+def update_ratio_data(
+    current_path: str | Path,
+    incoming_path: str | Path,
+    mode: str,
+) -> RatioUpdateStats:
+    current = Path(current_path)
+    incoming = Path(incoming_path)
+    if mode not in {"append", "replace"}:
+        raise SplitterError("基础数据更新方式必须是新增或覆盖。")
+
+    incoming_items, incoming_rows = ratio_file_info(incoming)
+    current.parent.mkdir(parents=True, exist_ok=True)
+    temporary = current.with_name(current.stem + ".updating.xlsx")
+
+    if mode == "replace":
+        shutil.copyfile(incoming, temporary)
+        os.replace(temporary, current)
+        return RatioUpdateStats(mode, incoming_rows, incoming_rows, incoming_items)
+
+    ratio_file_info(current)
+    try:
+        base_book = load_workbook(current, data_only=False, keep_links=False)
+        incoming_book = load_workbook(incoming, data_only=True, keep_links=False)
+    except Exception as exc:
+        raise SplitterError(f"无法打开基础数据文件：{exc}") from exc
+
+    try:
+        base_sheet, base_header_row, base_code_header, base_price_header = _ratio_sheet_info(base_book)
+        new_sheet, new_header_row, new_code_header, new_price_header = _ratio_sheet_info(incoming_book)
+        if base_sheet is None or new_sheet is None:
+            raise SplitterError("新增文件中未找到可识别的组合装数据工作表。")
+
+        base_headers = _header_map(base_sheet, base_header_row)
+        new_headers = _header_map(new_sheet, new_header_row)
+        base_mother_header = "母件编号" if "母件编号" in base_headers else "组合装编号"
+        new_mother_header = "母件编号" if "母件编号" in new_headers else "组合装编号"
+        base_mother_col = base_headers.get(base_mother_header)
+        new_mother_col = new_headers.get(new_mother_header)
+        base_code_col = base_headers[base_code_header]
+        new_code_col = new_headers[new_code_header]
+        new_price_col = new_headers[new_price_header]
+
+        existing: set[tuple[str, str]] = set()
+        for values in base_sheet.iter_rows(min_row=base_header_row + 1, values_only=True):
+            code = _code(values[base_code_col - 1])
+            if not code or code == _code(base_code_header):
+                continue
+            mother = _code(values[base_mother_col - 1]) if base_mother_col else ""
+            existing.add((mother, code))
+
+        style_row = min(base_header_row + 1, base_sheet.max_row)
+        added_rows = 0
+        for values in new_sheet.iter_rows(min_row=new_header_row + 1, values_only=True):
+            code = _code(values[new_code_col - 1])
+            if not code or code == _code(new_code_header):
+                continue
+            mother = _code(values[new_mother_col - 1]) if new_mother_col else ""
+            key = (mother, code)
+            if key in existing:
+                continue
+
+            target_row = base_sheet.max_row + 1
+            for header, target_col in base_headers.items():
+                source_header = header
+                if header == base_code_header:
+                    source_header = new_code_header
+                elif header == base_price_header:
+                    source_header = new_price_header
+                elif header == base_mother_header:
+                    source_header = new_mother_header
+                source_col = new_headers.get(source_header)
+                value = values[source_col - 1] if source_col else None
+                target = base_sheet.cell(target_row, target_col, value)
+                template = base_sheet.cell(style_row, target_col)
+                if template.has_style:
+                    target._style = copy(template._style)
+                target.number_format = template.number_format
+                target.alignment = copy(template.alignment)
+            existing.add(key)
+            added_rows += 1
+
+        if base_sheet.auto_filter.ref:
+            start = base_sheet.auto_filter.ref.split(":", 1)[0]
+            base_sheet.auto_filter.ref = f"{start}:{get_column_letter(base_sheet.max_column)}{base_sheet.max_row}"
+        for table in base_sheet.tables.values():
+            start = table.ref.split(":", 1)[0]
+            table.ref = f"{start}:{get_column_letter(base_sheet.max_column)}{base_sheet.max_row}"
+
+        base_book.save(temporary)
+    finally:
+        base_book.close()
+        incoming_book.close()
+
+    os.replace(temporary, current)
+    unique_items, source_rows = ratio_file_info(current)
+    return RatioUpdateStats(mode, added_rows, source_rows, unique_items)
 
 
 def _copy_column_layout(sheet, old_layout: dict[int, dict[str, object]]) -> None:

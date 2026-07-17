@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from splitter import SplitterError, process_workbooks
+from splitter import SplitterError, process_workbooks, ratio_file_info, update_ratio_data
 
 
 SALES_HEADERS = [
@@ -79,6 +79,52 @@ def add_order_amounts(path: Path, amounts: list[tuple[str, float]]) -> None:
 
 
 class SplitterTests(unittest.TestCase):
+    def test_append_ratio_data_adds_new_bundle_items_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current, incoming = root / "current.xlsx", root / "incoming.xlsx"
+            make_new_ratio(current)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "总表"
+            headers = ["母件编号", "编号", "名称", "规格", "条码", "长(cm)", "宽(cm)", "高(cm)", "重量(g)", "体积(cm³)", "单位", "数量", "执行价格", "分摊金额", "分摊比例", "上传SN", "赠品", "换算率"]
+            ws.append(headers)
+            ws.append(["A", "SKU1", "重复商品", "", "", "", "", "", "", "", "件", 1, 999, 999, 1, "否", "否", ""])
+            ws.append(["B", "SKU3", "新增商品", "", "", "", "", "", "", "", "件", 1, 30, 30, 1, "否", "否", ""])
+            wb.save(incoming)
+            wb.close()
+
+            stats = update_ratio_data(current, incoming, "append")
+
+            self.assertEqual(stats.added_rows, 1)
+            self.assertEqual(stats.source_rows, 3)
+            self.assertEqual(stats.unique_items, 3)
+            unique_items, source_rows = ratio_file_info(current)
+            self.assertEqual((unique_items, source_rows), (3, 3))
+            result = load_workbook(current, data_only=True)
+            data_sheet = max(result.worksheets, key=lambda sheet: sheet.max_row)
+            rows = list(data_sheet.iter_rows(min_row=2, values_only=True))
+            self.assertEqual(sum(1 for row in rows if row[0] == "A" and row[1] == "SKU1"), 1)
+            self.assertTrue(any(row[0] == "B" and row[1] == "SKU3" and row[12] == 30 for row in rows))
+            result.close()
+
+    def test_replace_ratio_data_uses_incoming_workbook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current, incoming = root / "current.xlsx", root / "incoming.xlsx"
+            make_new_ratio(current)
+            make_ratio(incoming)
+
+            stats = update_ratio_data(current, incoming, "replace")
+
+            self.assertEqual(stats.added_rows, 3)
+            self.assertEqual(stats.source_rows, 3)
+            self.assertEqual(stats.unique_items, 2)
+            result = load_workbook(current, data_only=True)
+            self.assertIn("Sheet2", result.sheetnames)
+            self.assertNotIn("sheet1", result.sheetnames)
+            result.close()
+
     def test_supports_new_ratio_export_format(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
