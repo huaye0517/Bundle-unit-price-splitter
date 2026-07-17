@@ -23,8 +23,10 @@ New-Item -ItemType Directory -Path "outputs" -Force | Out-Null
 Copy-Item -LiteralPath "DesktopApp.cs" -Destination (Join-Path $LauncherBuildDir "DesktopApp.cs") -Force
 Copy-Item -LiteralPath "work\worker-dist\SplitterWorker.exe" -Destination (Join-Path $LauncherBuildDir "SplitterWorker.exe") -Force
 Copy-Item -LiteralPath "assets\DefaultRatioData.xlsx" -Destination (Join-Path $LauncherBuildDir "DefaultRatioData.xlsx") -Force
+Copy-Item -LiteralPath "assets\app-icon.ico" -Destination (Join-Path $LauncherBuildDir "app-icon.ico") -Force
 $LauncherExe = Join-Path $LauncherBuildDir "BundleUnitPriceSplitter.exe"
 & $Csc /nologo /target:winexe /optimize+ /out:$LauncherExe `
+    /win32icon:"$LauncherBuildDir\app-icon.ico" `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
     /resource:"$LauncherBuildDir\SplitterWorker.exe,SplitterWorker.exe" `
     /resource:"$LauncherBuildDir\DefaultRatioData.xlsx,DefaultRatioData.xlsx" `

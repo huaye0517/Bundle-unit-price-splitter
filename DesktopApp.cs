@@ -61,6 +61,7 @@ internal sealed class SplitterForm : Form
     internal SplitterForm()
     {
         Text = "组合装单价拆分工具";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(780, 690);
         ClientSize = new Size(900, 720);
