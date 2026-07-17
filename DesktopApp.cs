@@ -88,16 +88,26 @@ internal sealed class SplitterForm : Form
         salesPathLabel = MakePathLabel("尚未选择文件");
         content.Controls.Add(MakeFileCard("销售单原表", "按网店订单号分组，引用 Sheet1 的订单金额", salesPathLabel, ChooseSales), 0, 5);
 
-        var ledger = new Panel { Dock = DockStyle.Fill, BackColor = Paper, Padding = new Padding(0, 14, 0, 8) };
+        var ledger = new TableLayoutPanel {
+            Dock = DockStyle.Fill, BackColor = Paper, Padding = new Padding(0, 10, 0, 6),
+            ColumnCount = 1, RowCount = 4, Margin = new Padding(0)
+        };
+        ledger.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        ledger.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        ledger.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        ledger.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
+        ledger.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         var ledgerTitle = MakeLabel("金额核对", new Font("Microsoft YaHei UI", 11F, FontStyle.Bold), Ink);
-        ledgerTitle.Location = new Point(0, 12); ledgerTitle.AutoSize = true;
+        ledgerTitle.Margin = new Padding(0);
         balanceLabel = MakeLabel("等待计算 · 订单金额 —  拆分 —  差额 —", new Font("Consolas", 10F, FontStyle.Bold), Teal);
-        balanceLabel.BackColor = TealSoft; balanceLabel.Location = new Point(0, 43); balanceLabel.Size = new Size(816, 38);
-        balanceLabel.Padding = new Padding(12, 9, 12, 8); balanceLabel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-        progressBar = new ProgressBar { Location = new Point(0, 88), Size = new Size(816, 10), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Style = ProgressBarStyle.Continuous };
-        statusLabel = MakeLabel("选择两份 Excel 后即可开始", BodyFont, Muted);
-        statusLabel.Location = new Point(0, 108); statusLabel.AutoSize = true;
-        ledger.Controls.Add(ledgerTitle); ledger.Controls.Add(balanceLabel); ledger.Controls.Add(progressBar); ledger.Controls.Add(statusLabel);
+        balanceLabel.BackColor = TealSoft; balanceLabel.Padding = new Padding(12, 0, 12, 0); balanceLabel.Margin = new Padding(0);
+        progressBar = new ProgressBar { Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 4), Style = ProgressBarStyle.Continuous };
+        statusLabel = MakeLabel("选择上方两份 Excel 后开始拆分", BodyFont, Muted);
+        statusLabel.Margin = new Padding(0);
+        ledger.Controls.Add(ledgerTitle, 0, 0);
+        ledger.Controls.Add(balanceLabel, 0, 1);
+        ledger.Controls.Add(progressBar, 0, 2);
+        ledger.Controls.Add(statusLabel, 0, 3);
         content.Controls.Add(ledger, 0, 6);
 
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Paper, ColumnCount = 2, RowCount = 1 };
