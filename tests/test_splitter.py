@@ -28,6 +28,18 @@ def make_ratio(path: Path) -> None:
     wb.save(path)
 
 
+def make_new_ratio(path: Path) -> None:
+    wb = Workbook()
+    wb.active.title = "sheet"
+    ws = wb.create_sheet("sheet1")
+    headers = ["母件编号", "编号", "名称", "规格", "条码", "长(cm)", "宽(cm)", "高(cm)", "重量(g)", "体积(cm³)", "单位", "数量", "执行价格", "分摊金额", "分摊比例", "上传SN", "赠品", "换算率"]
+    ws.append(headers)
+    ws.append(["A", "SKU1", "商品1", "", "", "", "", "", "", "", "件", 2, 40, 80, 0.4, "否", "否", ""])
+    ws.append(headers)  # merged exports can contain repeated header rows
+    ws.append(["A", "SKU2", "商品2", "", "", "", "", "", "", "", "件", 2, 60, 120, 0.6, "否", "否", ""])
+    wb.save(path)
+
+
 def make_sales(path: Path) -> None:
     wb = Workbook()
     ws = wb.active
@@ -48,7 +60,40 @@ def make_sales(path: Path) -> None:
     wb.save(path)
 
 
+def add_order_amounts(path: Path, amounts: list[tuple[str, float]]) -> None:
+    wb = load_workbook(path)
+    if "Sheet1" in wb.sheetnames:
+        del wb["Sheet1"]
+    ws = wb.create_sheet("Sheet1")
+    headers = [""] * 14
+    headers[11] = "网店订单号"
+    headers[13] = "订单金额"
+    ws.append(headers)
+    for web_order, amount in amounts:
+        row = [""] * 14
+        row[11] = web_order
+        row[13] = amount
+        ws.append(row)
+    wb.save(path)
+    wb.close()
+
+
 class SplitterTests(unittest.TestCase):
+    def test_supports_new_ratio_export_format(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_new_ratio(ratio)
+            make_sales(sales)
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.matched_rows, 2)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertEqual(result["AA3"].value, 40)
+            self.assertEqual(result["AA4"].value, 60)
+            self.assertAlmostEqual(result["AH3"].value + result["AH4"].value, 200, places=12)
+
     def test_formula_chain_and_first_match(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -77,6 +122,7 @@ class SplitterTests(unittest.TestCase):
             self.assertAlmostEqual(ws["AA4"].value, 60, places=12)
             self.assertAlmostEqual(ws["AC4"].value, 60, places=12)
             self.assertAlmostEqual(ws["AD4"].value, 120, places=12)
+            self.assertAlmostEqual(ws["AD3"].value + ws["AD4"].value, 200, places=12)
             self.assertAlmostEqual(ws["AH3"].value + ws["AH4"].value, 200, places=12)
             self.assertIn("销售明细", wb.sheetnames)
             self.assertIn("其他工作表", wb.sheetnames)
@@ -102,12 +148,15 @@ class SplitterTests(unittest.TestCase):
             for row in range(2, 5):
                 self.assertEqual(result.cell(row, 27).value, 0)
                 self.assertEqual(result.cell(row, 29).value, 50)
+            self.assertEqual(result.cell(2, 30).value, 50)
+            self.assertEqual(result.cell(3, 30).value, 50)
+            self.assertEqual(result.cell(4, 30).value, 100)
             self.assertEqual(result.cell(2, 34).value, 50)
             self.assertEqual(result.cell(3, 34).value, 50)
             self.assertEqual(result.cell(4, 34).value, 100)
             self.assertEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 200)
 
-    def test_web_orders_are_balanced_independently(self):
+    def test_internal_orders_are_balanced_independently(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
@@ -118,6 +167,7 @@ class SplitterTests(unittest.TestCase):
             ws["K2"] = "WEB-A"
             ws["K3"] = "WEB-A"
             ws["K4"] = "WEB-B"
+            ws["B4"] = "ORDER-2"
             ws["N2"] = 50
             ws["N3"] = None
             ws["N4"] = 80
@@ -129,6 +179,82 @@ class SplitterTests(unittest.TestCase):
             result = load_workbook(output, data_only=True)["拆分结果"]
             self.assertAlmostEqual(result["AD2"].value + result["AD3"].value, 50, places=12)
             self.assertAlmostEqual(result["AD4"].value, 80, places=12)
+            self.assertAlmostEqual(result["AH2"].value + result["AH3"].value, 50, places=12)
+            self.assertAlmostEqual(result["AH4"].value, 80, places=12)
+
+    def test_sheet1_order_amounts_are_allocated_by_web_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            wb = load_workbook(sales)
+            ws = wb["销售明细"]
+            ws["K2"] = "WEB-A"
+            ws["K3"] = "WEB-A"
+            ws["K4"] = "WEB-B"
+            ws["N2"] = 130
+            ws["N3"] = 130
+            ws["N4"] = 130
+            wb.save(sales)
+            wb.close()
+            add_order_amounts(sales, [("WEB-A", 50), ("WEB-B", 80)])
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.orders, 2)
+            self.assertEqual(stats.exceptional_orders, 0)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 130, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 130, places=12)
+
+    def test_zero_original_amount_does_not_participate_in_allocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            wb = load_workbook(sales)
+            ws = wb["销售明细"]
+            ws["AC3"] = 0
+            wb.save(sales)
+            wb.close()
+
+            process_workbooks(ratio, sales, output)
+
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertEqual(result["AA3"].value, 0)
+            self.assertEqual(result["AD3"].value, 0)
+            self.assertEqual(result["AH3"].value, 0)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 200, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 200, places=12)
+
+    def test_sheet1_web_order_amount_overrides_repeated_source_totals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            wb = load_workbook(sales)
+            ws = wb["销售明细"]
+            ws["K2"] = "WEB-SHARED"
+            ws["K3"] = "WEB-SHARED"
+            ws["K4"] = "WEB-SHARED"
+            ws["B4"] = "ORDER-2"
+            ws["N2"] = 50
+            ws["N3"] = None
+            ws["N4"] = 80
+            wb.save(sales)
+            wb.close()
+            add_order_amounts(sales, [("WEB-SHARED", 130)])
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.orders, 1)
+            self.assertEqual(stats.exceptional_orders, 0)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 130, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 130, places=12)
 
     def test_uses_sales_sheet_with_most_rows(self):
         with tempfile.TemporaryDirectory() as directory:

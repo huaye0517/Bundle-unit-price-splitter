@@ -81,17 +81,17 @@ internal sealed class SplitterForm : Form
 
         content.Controls.Add(MakeLabel("BUNDLE / UNIT LEDGER", new Font("Consolas", 9F, FontStyle.Bold), Teal), 0, 0);
         content.Controls.Add(MakeLabel("组合装单价拆分", new Font("Microsoft YaHei UI", 24F, FontStyle.Bold), Ink), 0, 1);
-        content.Controls.Add(MakeLabel("读取拆分占比，按订单一次完成 AA、AB、AC、AD、AH 五列计算。", BodyFont, Muted), 0, 2);
+        content.Controls.Add(MakeLabel("读取 Sheet1 订单金额，按网店订单完成 AA、AB、AC、AD、AH 计算。", BodyFont, Muted), 0, 2);
 
         ratioPathLabel = MakePathLabel("尚未选择文件");
-        content.Controls.Add(MakeFileCard("组合装拆分占比表", "读取 Sheet2：单品编号、金额、分摊比例、单价", ratioPathLabel, ChooseRatio), 0, 3);
+        content.Controls.Add(MakeFileCard("组合装拆分占比表", "自动识别旧版 Sheet2，或新版 sheet1/总表：编号、执行价格", ratioPathLabel, ChooseRatio), 0, 3);
         salesPathLabel = MakePathLabel("尚未选择文件");
-        content.Controls.Add(MakeFileCard("销售单原表", "按订单编号分组，新增“拆分结果”工作表", salesPathLabel, ChooseSales), 0, 5);
+        content.Controls.Add(MakeFileCard("销售单原表", "按网店订单号分组，引用 Sheet1 的订单金额", salesPathLabel, ChooseSales), 0, 5);
 
         var ledger = new Panel { Dock = DockStyle.Fill, BackColor = Paper, Padding = new Padding(0, 14, 0, 8) };
         var ledgerTitle = MakeLabel("金额核对", new Font("Microsoft YaHei UI", 11F, FontStyle.Bold), Ink);
         ledgerTitle.Location = new Point(0, 12); ledgerTitle.AutoSize = true;
-        balanceLabel = MakeLabel("等待计算 · 应收 —  拆分 —  差额 —", new Font("Consolas", 10F, FontStyle.Bold), Teal);
+        balanceLabel = MakeLabel("等待计算 · 订单金额 —  拆分 —  差额 —", new Font("Consolas", 10F, FontStyle.Bold), Teal);
         balanceLabel.BackColor = TealSoft; balanceLabel.Location = new Point(0, 43); balanceLabel.Size = new Size(816, 38);
         balanceLabel.Padding = new Padding(12, 9, 12, 8); balanceLabel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         progressBar = new ProgressBar { Location = new Point(0, 88), Size = new Size(816, 10), Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Style = ProgressBarStyle.Continuous };
@@ -198,18 +198,18 @@ internal sealed class SplitterForm : Form
     {
         if (string.IsNullOrEmpty(ratioPath) || string.IsNullOrEmpty(salesPath)) { MessageBox.Show("请先选择组合装拆分占比表和销售单原表。", "还缺文件", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         generateButton.Enabled = false; progressBar.Style = ProgressBarStyle.Continuous; progressBar.Value = 0;
-        statusLabel.Text = "正在读取数据并按订单计算"; balanceLabel.Text = "正在核对 · 应收计算中  拆分计算中  差额计算中";
+        statusLabel.Text = "正在读取数据并按网店订单计算"; balanceLabel.Text = "正在核对 · 订单金额计算中  拆分计算中  差额计算中";
         bool succeeded = false;
         try {
             var result = await Task.Run(() => RunWorker(UpdateProgress));
             if (!result.ContainsKey("status") || result["status"] != "ok") throw new Exception(Decode(result.ContainsKey("message_b64") ? result["message_b64"] : ""));
             int orders = ParseInt(result, "orders"), matched = ParseInt(result, "matched_rows"), unmatched = ParseInt(result, "unmatched_rows"), exceptional = ParseInt(result, "exceptional_orders");
             outputPath = Decode(result["output_path_b64"]);
-            statusLabel.Text = string.Format("完成：{0} 个网店订单，{1} 行匹配，{2} 行未匹配", orders, matched, unmatched);
-            balanceLabel.Text = exceptional == 0 ? string.Format("核对通过 · 网店订单 {0}  匹配 {1}  普通商品 {2}", orders, matched, unmatched) : string.Format("有 {0} 个异常订单 · 其拆分列已填 0", exceptional);
+            statusLabel.Text = string.Format("完成：{0} 个销售单组，{1} 行匹配，{2} 行未匹配", orders, matched, unmatched);
+            balanceLabel.Text = exceptional == 0 ? string.Format("核对通过 · 销售单组 {0}  匹配 {1}  普通商品 {2}", orders, matched, unmatched) : string.Format("有 {0} 个异常订单 · 其拆分列已填 0", exceptional);
             progressBar.Value = 100;
             succeeded = true;
-            var message = string.Format("结果已保存：\n{0}\n\n网店订单：{1}\n匹配行：{2}\n未匹配普通商品：{3}\n异常订单：{4}\n\n是否打开结果所在文件夹？", outputPath, orders, matched, unmatched, exceptional);
+            var message = string.Format("结果已保存：\n{0}\n\n销售单组：{1}\n匹配行：{2}\n未匹配普通商品：{3}\n异常订单：{4}\n\n是否打开结果所在文件夹？", outputPath, orders, matched, unmatched, exceptional);
             if (MessageBox.Show(message, "拆分完成", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) Process.Start("explorer.exe", "/select,\"" + outputPath + "\"");
         } catch (Exception ex) { progressBar.Value = 0; balanceLabel.Text = "核对未通过 · 未生成结果文件"; statusLabel.Text = "生成失败，请按提示检查文件"; MessageBox.Show(ex.Message, "无法生成拆分表", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { if (!succeeded) progressBar.Value = 0; generateButton.Enabled = true; }

@@ -17,39 +17,52 @@ SALES = Path(os.environ.get("BUNDLE_SPLITTER_SALES_SAMPLE", "__missing_sales_sam
 
 @unittest.skipUnless(RATIO.exists() and SALES.exists(), "样例 Excel 不在当前电脑")
 class RealSampleTests(unittest.TestCase):
-    def test_every_web_order_balances_to_receivable_total(self):
+    def test_sheet1_order_amount_drives_ad_and_ah(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "sample-output.xlsx"
+            original = load_workbook(SALES, data_only=True, read_only=True)
+            original_order_amounts = [
+                row[0]
+                for row in original["Sheet1"].iter_rows(
+                    min_row=2, min_col=14, max_col=14, values_only=True
+                )
+            ]
+            sheet1_amounts = {
+                str(row[0]): float(row[2])
+                for row in original["Sheet1"].iter_rows(
+                    min_row=2, min_col=12, max_col=14, values_only=True
+                )
+                if row[0] and row[2] is not None
+            }
+            original.close()
             stats = process_workbooks(RATIO, SALES, output)
             self.assertGreater(stats.matched_rows, 0)
             wb = load_workbook(output, data_only=True, read_only=True)
-            source = max(
-                (
-                    sheet
-                    for sheet in wb.worksheets
-                    if sheet.title != "拆分结果"
-                    and sheet.cell(1, 11).value == "网店订单号"
-                    and sheet.cell(1, 29).value == "金额"
-                ),
-                key=lambda sheet: sheet.max_row,
-            )
             result = wb["拆分结果"]
-            receivable_totals = {}
-            split_totals = defaultdict(float)
-            for row in source.iter_rows(min_row=2, values_only=True):
-                if row[10] and row[13] is not None:
-                    order = str(row[10])
-                    total = float(row[13])
-                    if order in receivable_totals:
-                        self.assertAlmostEqual(receivable_totals[order], total, places=8)
-                    else:
-                        receivable_totals[order] = total
+            output_order_amounts = [
+                row[0]
+                for row in wb["Sheet1"].iter_rows(
+                    min_row=2, min_col=14, max_col=14, values_only=True
+                )
+            ]
+            self.assertEqual(output_order_amounts, original_order_amounts)
+            ad_totals = defaultdict(float)
+            ah_totals = defaultdict(float)
             for row in result.iter_rows(min_row=2, values_only=True):
+                self.assertAlmostEqual(float(row[29] or 0), float(row[33] or 0), places=8)
+                if float(row[32] or 0) == 0:
+                    self.assertEqual(float(row[26] or 0), 0)
+                    self.assertEqual(float(row[29] or 0), 0)
+                    self.assertEqual(float(row[33] or 0), 0)
                 if row[10]:
-                    split_totals[str(row[10])] += float(row[29] or 0)
-            self.assertEqual(set(receivable_totals), set(split_totals))
-            for order, total in receivable_totals.items():
-                self.assertAlmostEqual(split_totals[order], total, places=8)
+                    order = str(row[10])
+                    ad_totals[order] += float(row[29] or 0)
+                    ah_totals[order] += float(row[33] or 0)
+            self.assertEqual(set(ad_totals), set(ah_totals))
+            for order in ad_totals:
+                total = sheet1_amounts.get(order, 0.0)
+                self.assertAlmostEqual(ad_totals[order], total, places=8)
+                self.assertAlmostEqual(ah_totals[order], total, places=8)
             wb.close()
 
 

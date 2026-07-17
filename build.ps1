@@ -22,12 +22,12 @@ New-Item -ItemType Directory -Path $LauncherBuildDir -Force | Out-Null
 New-Item -ItemType Directory -Path "outputs" -Force | Out-Null
 Copy-Item -LiteralPath "DesktopApp.cs" -Destination (Join-Path $LauncherBuildDir "DesktopApp.cs") -Force
 Copy-Item -LiteralPath "work\worker-dist\SplitterWorker.exe" -Destination (Join-Path $LauncherBuildDir "SplitterWorker.exe") -Force
-$LauncherExe = Join-Path $LauncherBuildDir "BundleUnitPriceSplitter_v3.exe"
+$LauncherExe = Join-Path $LauncherBuildDir "BundleUnitPriceSplitter_v8.exe"
 & $Csc /nologo /target:winexe /optimize+ /out:$LauncherExe `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
     /resource:"$LauncherBuildDir\SplitterWorker.exe,SplitterWorker.exe" `
     "$LauncherBuildDir\DesktopApp.cs"
 if ($LASTEXITCODE -ne 0) { throw "C# compiler failed with exit code $LASTEXITCODE" }
-Copy-Item -LiteralPath $LauncherExe -Destination "outputs\BundleUnitPriceSplitter_v3.exe" -Force
+Copy-Item -LiteralPath $LauncherExe -Destination "outputs\BundleUnitPriceSplitter_v8.exe" -Force
 
-Write-Host "Built outputs\BundleUnitPriceSplitter_v3.exe"
+Write-Host "Built outputs\BundleUnitPriceSplitter_v8.exe"
