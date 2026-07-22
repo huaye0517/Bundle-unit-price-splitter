@@ -61,7 +61,9 @@ RESULT_HEADERS = {
     28: "占比",        # AB
     29: "单价",        # AC
     30: "金额",        # AD
-    34: "摊后金额",    # AH
+    34: "手续费1%",    # AH
+    35: "最终金额",    # AI
+    36: "摊后金额",    # AJ
 }
 
 
@@ -297,7 +299,7 @@ def _copy_column_layout(sheet, old_layout: dict[int, dict[str, object]]) -> None
     for old_col in range(27, 30):
         mapping[old_col] = old_col + 4
     for old_col in range(30, 35):
-        mapping[old_col] = old_col + 5
+        mapping[old_col] = old_col + 7
 
     for old_col, new_col in mapping.items():
         props = old_layout.get(old_col, {})
@@ -305,7 +307,7 @@ def _copy_column_layout(sheet, old_layout: dict[int, dict[str, object]]) -> None
         for name, value in props.items():
             setattr(dim, name, value)
 
-    widths = {27: 16, 28: 15, 29: 16, 30: 16, 34: 16}
+    widths = {27: 16, 28: 15, 29: 16, 30: 16, 34: 13, 35: 13, 36: 16}
     for col, width in widths.items():
         sheet.column_dimensions[get_column_letter(col)].width = width
 
@@ -336,10 +338,11 @@ def _style_new_columns(sheet, header_row: int) -> None:
                 target._style = copy(source._style)
             target.number_format = "0.00"
         amount_source = sheet.cell(row, amount_style_col)
-        target = sheet.cell(row, 34)
-        if amount_source.has_style:
-            target._style = copy(amount_source._style)
-        target.number_format = "0.00"
+        for col in (34, 35, 36):
+            target = sheet.cell(row, col)
+            if amount_source.has_style:
+                target._style = copy(amount_source._style)
+        sheet.cell(row, 36).number_format = "0.00"
 
     header_fill = PatternFill("solid", fgColor="245C73")
     for col, title in RESULT_HEADERS.items():
@@ -349,13 +352,15 @@ def _style_new_columns(sheet, header_row: int) -> None:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
-def _extend_auto_filter(sheet) -> None:
+def _extend_auto_filter(sheet, header_row: int) -> None:
     if sheet.auto_filter and sheet.auto_filter.ref:
         ref = sheet.auto_filter.ref
         if ":" in ref:
             start, end = ref.split(":", 1)
             end_row = "".join(ch for ch in end if ch.isdigit()) or str(sheet.max_row)
-            sheet.auto_filter.ref = f"{start}:AM{end_row}"
+            sheet.auto_filter.ref = f"{start}:AO{end_row}"
+            return
+    sheet.auto_filter.ref = f"A{header_row}:AO{sheet.max_row}"
 
 
 def _refresh_pivots_on_open(workbook) -> None:
@@ -367,28 +372,35 @@ def _refresh_pivots_on_open(workbook) -> None:
                 cache.refreshOnLoad = True
 
 
-def _freeze_cached_order_amounts(workbook, cached_workbook) -> int:
+def _freeze_cached_amounts(workbook, cached_workbook) -> int:
     frozen = 0
     for sheet in workbook.worksheets:
         if sheet.title not in cached_workbook.sheetnames:
             continue
         for header_row in range(1, min(sheet.max_row, 5) + 1):
             headers = _header_map(sheet, header_row)
-            if "订单金额" not in headers:
+            amount_columns = [
+                headers[header]
+                for header in ("订单金额", "应收合计")
+                if header in headers
+            ]
+            if not amount_columns:
                 continue
-            column = headers["订单金额"]
             cached_sheet = cached_workbook[sheet.title]
-            cached_values = cached_sheet.iter_rows(
-                min_row=header_row + 1,
-                min_col=column,
-                max_col=column,
-                values_only=True,
-            )
-            for row, values in enumerate(cached_values, start=header_row + 1):
-                formula = sheet.cell(row, column).value
-                if isinstance(formula, str) and formula.startswith("=") and values[0] is not None:
-                    sheet.cell(row, column, values[0])
-                    frozen += 1
+            for column in amount_columns:
+                cached_values = cached_sheet.iter_rows(
+                    min_row=header_row + 1,
+                    max_row=sheet.max_row,
+                    min_col=column,
+                    max_col=column,
+                    values_only=True,
+                )
+                for row, values in enumerate(cached_values, start=header_row + 1):
+                    formula = sheet.cell(row, column).value
+                    if isinstance(formula, str) and formula.startswith("="):
+                        sheet.cell(row, column).value = values[0]
+                        if values[0] is not None:
+                            frozen += 1
             break
     return frozen
 
@@ -425,16 +437,110 @@ def _prepare_result_sheet(workbook, source_sheet, header_row: int):
     result_sheet = workbook.copy_worksheet(source_sheet)
     result_sheet.title = "拆分结果"
     result_sheet.insert_cols(27, amount=4)
-    result_sheet.insert_cols(34, amount=1)
+    result_sheet.insert_cols(34, amount=3)
     _copy_column_layout(result_sheet, old_layout)
     _style_new_columns(result_sheet, header_row)
-    _extend_auto_filter(result_sheet)
+    _extend_auto_filter(result_sheet, header_row)
     return result_sheet
 
 
 def _zero_targets(sheet, row: int) -> None:
     for col in RESULT_HEADERS:
         sheet.cell(row, col, 0.0)
+
+
+def _write_result_formulas(sheet, header_row: int) -> None:
+    for row in range(header_row + 1, sheet.max_row + 1):
+        if all(sheet.cell(row, col).value is None for col in range(1, 27)):
+            continue
+        sheet.cell(row, 34, f"=AG{row}*1%")
+        sheet.cell(row, 35, f"=N{row}-AH{row}")
+
+
+def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amounts: dict[str, float]):
+    if "透视表" in workbook.sheetnames:
+        workbook.remove(workbook["透视表"])
+    summary = workbook.create_sheet("透视表")
+    summary.append(["网店订单号", "平均值项:应收合计", "求和项:金额", "差异"])
+
+    totals: OrderedDict[str, dict[str, object]] = OrderedDict()
+    for row in range(header_row + 1, result_sheet.max_row + 1):
+        order = _text(result_sheet.cell(row, 11).value)
+        if not order:
+            continue
+        entry = totals.setdefault(
+            order, {"receivables": [], "allocated": 0.0, "fee_base": 0.0}
+        )
+        value = result_sheet.cell(row, 14).value
+        if _text(value) != "":
+            try:
+                entry["receivables"].append(_number(value, f"第 {row} 行应收合计"))
+            except ValueError:
+                pass
+        allocated = result_sheet.cell(row, 30).value
+        if _text(allocated) != "":
+            try:
+                entry["allocated"] += _number(allocated, f"第 {row} 行拆分金额")
+            except ValueError:
+                pass
+        original_amount = result_sheet.cell(row, 33).value
+        if _text(original_amount) != "":
+            try:
+                entry["fee_base"] += _number(original_amount, f"第 {row} 行原金额")
+            except ValueError:
+                pass
+
+    for order in sorted(totals):
+        entry = totals[order]
+        receivables = entry["receivables"]
+        target = order_amounts.get(order)
+        if target is None:
+            target = (
+                receivables[0] - entry["fee_base"] * 0.01
+                if receivables
+                and all(abs(value - receivables[0]) <= 1e-9 for value in receivables[1:])
+                else 0.0
+            )
+        row = summary.max_row + 1
+        summary.cell(row, 1, order)
+        summary.cell(row, 2, target)
+        summary.cell(row, 3, entry["allocated"])
+        summary.cell(row, 4, f"=C{row}-B{row}")
+
+    total_row = summary.max_row + 1
+    summary.cell(total_row, 1, "总计")
+    if total_row == 2:
+        summary.cell(total_row, 2, 0.0)
+        summary.cell(total_row, 3, 0.0)
+    else:
+        summary.cell(total_row, 2, f"=SUM(B2:B{total_row - 1})")
+        summary.cell(total_row, 3, f"=SUM(C2:C{total_row - 1})")
+    summary.cell(total_row, 4, f"=C{total_row}-B{total_row}")
+
+    header_fill = PatternFill("solid", fgColor="245C73")
+    for cell in summary[1]:
+        cell.fill = header_fill
+        cell.font = Font(name="Microsoft YaHei UI", size=10, bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for cell in summary[total_row]:
+        cell.font = Font(name="Microsoft YaHei UI", size=10, bold=True)
+    for row in range(2, total_row + 1):
+        for col in range(2, 5):
+            summary.cell(row, col).number_format = "0.00_);[Red]\\(0.00\\)"
+    summary.column_dimensions["A"].width = 36
+    summary.column_dimensions["B"].width = 18.25
+    summary.column_dimensions["C"].width = 13
+    summary.column_dimensions["D"].width = 12.625
+    summary.freeze_panes = "A2"
+    if total_row > 2:
+        summary.auto_filter.ref = f"A1:D{total_row - 1}"
+    return summary
+
+
+def _enable_formula_recalculation(workbook) -> None:
+    workbook.calculation.calcMode = "auto"
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
 
 
 def _calculate_rows(
@@ -537,11 +643,13 @@ def _calculate_rows(
                 invalid_reason = str(exc)
 
             if not order_totals:
-                invalid_reason = "Sheet1 订单金额为空"
+                invalid_reason = (
+                    "应收合计为空或公式没有缓存值，请先用 Excel/WPS 打开并保存源文件后再上传"
+                )
             elif any(abs(value - order_totals[0]) > 1e-9 for value in order_totals[1:]):
                 invalid_reason = "同一网店订单存在多个不同的应收合计"
             else:
-                target_total = order_totals[0]
+                target_total = order_totals[0] - sum(original_amounts.values()) * 0.01
 
         if invalid_reason is not None:
             stats.exceptional_orders += 1
@@ -594,7 +702,7 @@ def _calculate_rows(
                 sheet.cell(row, 28, 0.0)
                 sheet.cell(row, 29, ac)
                 sheet.cell(row, 30, ad)
-                sheet.cell(row, 34, ad)
+                sheet.cell(row, 36, ad)
             if order_progress:
                 order_progress(order_index, total_orders)
             continue
@@ -619,7 +727,7 @@ def _calculate_rows(
             sheet.cell(row, 28, ab)
             sheet.cell(row, 29, ac)
             sheet.cell(row, 30, ad)
-            sheet.cell(row, 34, ad)
+            sheet.cell(row, 36, ad)
 
         if order_progress:
             order_progress(order_index, total_orders)
@@ -667,6 +775,7 @@ def process_workbooks(
         source_sheet, header_row = _find_sheet(workbook, SALES_HEADERS)
         if source_sheet is None:
             raise SplitterError("销售单中未找到包含完整销售字段的明细工作表。")
+        _freeze_cached_amounts(workbook, cached_workbook)
         report(45, f"复制销售明细表“{source_sheet.title}”")
         result_sheet = _prepare_result_sheet(workbook, source_sheet, header_row)
         order_amounts = _load_cached_order_amounts(cached_workbook)
@@ -681,10 +790,12 @@ def process_workbooks(
                 f"正在拆分订单 {done}/{total}",
             ),
         )
+        _write_result_formulas(result_sheet, header_row)
+        _prepare_summary_sheet(workbook, result_sheet, header_row, order_amounts)
+        _enable_formula_recalculation(workbook)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         report(90, "保存结果工作簿")
-        _freeze_cached_order_amounts(workbook, cached_workbook)
         _refresh_pivots_on_open(workbook)
         workbook.save(output_path)
         stats.output_path = str(output_path)
