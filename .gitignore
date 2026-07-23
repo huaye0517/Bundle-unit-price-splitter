@@ -1,6 +1,7 @@
 # Build outputs and temporary files
 outputs/
 work/
+.tmp/
 __pycache__/
 *.py[cod]
 

@@ -45,16 +45,23 @@ internal sealed class SplitterForm : Form
 
     private readonly Label ratioPathLabel;
     private readonly Label salesPathLabel;
+    private readonly Label referencePathLabel;
     private readonly Label outputPathLabel;
     private readonly Label statusLabel;
     private readonly Label balanceLabel;
     private readonly RadioButton appendRatioRadio;
     private readonly RadioButton replaceRatioRadio;
     private readonly Button ratioUpdateButton;
+    private readonly CheckBox referenceCheckBox;
+    private readonly Panel referenceCard;
+    private readonly RowStyle referenceSectionRow;
+    private readonly RowStyle referenceCardRow;
+    private readonly System.Windows.Forms.Timer referenceAnimation;
     private readonly ProgressBar progressBar;
     private readonly Button generateButton;
     private string ratioPath = "";
     private string salesPath = "";
+    private string referencePath = "";
     private string outputPath = "";
     private string workerPath = "";
 
@@ -63,15 +70,15 @@ internal sealed class SplitterForm : Form
         Text = "组合装单价拆分工具";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(780, 690);
-        ClientSize = new Size(900, 720);
+        MinimumSize = new Size(780, 720);
+        ClientSize = new Size(900, 760);
         BackColor = Paper;
         Font = BodyFont;
         AutoScaleMode = AutoScaleMode.Dpi;
 
         var content = new TableLayoutPanel {
             Dock = DockStyle.Fill, Padding = new Padding(42, 30, 42, 26),
-            BackColor = Paper, ColumnCount = 1, RowCount = 9
+            BackColor = Paper, ColumnCount = 1, RowCount = 10
         };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
@@ -80,6 +87,8 @@ internal sealed class SplitterForm : Form
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 136));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
+        referenceSectionRow = new RowStyle(SizeType.Absolute, 40);
+        content.RowStyles.Add(referenceSectionRow);
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 146));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
@@ -87,7 +96,7 @@ internal sealed class SplitterForm : Form
 
         content.Controls.Add(MakeLabel("BUNDLE / UNIT LEDGER", new Font("Consolas", 9F, FontStyle.Bold), Teal), 0, 0);
         content.Controls.Add(MakeLabel("组合装单价拆分", new Font("Microsoft YaHei UI", 24F, FontStyle.Bold), Ink), 0, 1);
-        content.Controls.Add(MakeLabel("读取 Sheet1 订单金额，按网店订单完成 AA、AB、AC、AD、AH 计算。", BodyFont, Muted), 0, 2);
+        content.Controls.Add(MakeLabel("读取订单金额，扣除服务费、手续费及赔偿，按网店订单完成拆分与核对。", BodyFont, Muted), 0, 2);
 
         ratioPathLabel = MakePathLabel("正在准备内置基础数据…");
         appendRatioRadio = MakeRadio("新增", true);
@@ -98,6 +107,34 @@ internal sealed class SplitterForm : Form
         var salesCard = MakeFileCard("销售单原表", "拖入销售单，按网店订单号引用 Sheet1 订单金额", salesPathLabel, ChooseSales);
         EnableExcelDrop(salesCard, DropSales);
         content.Controls.Add(salesCard, 0, 5);
+
+        var referenceSection = new TableLayoutPanel {
+            Dock = DockStyle.Fill, BackColor = Paper, ColumnCount = 1, RowCount = 2,
+            Margin = new Padding(0), Padding = new Padding(0)
+        };
+        referenceSection.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        referenceSection.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        referenceCardRow = new RowStyle(SizeType.Absolute, 0);
+        referenceSection.RowStyles.Add(referenceCardRow);
+        referenceCheckBox = new CheckBox {
+            Text = "包含服务费/赔偿账单", AutoSize = true, Checked = false,
+            Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold),
+            ForeColor = Ink, BackColor = Paper, Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 9, 0, 7)
+        };
+        referenceCheckBox.CheckedChanged += ReferenceCheckedChanged;
+        referencePathLabel = MakePathLabel("尚未选择引用表 · 也可将 .xlsx 拖到这里");
+        referenceCard = MakeFileCard(
+            "服务费/赔偿引用表",
+            "仅在订单存在服务费或赔偿时上传；按订单号汇总",
+            referencePathLabel,
+            ChooseReference
+        );
+        referenceCard.Visible = false;
+        EnableExcelDrop(referenceCard, DropReference);
+        referenceSection.Controls.Add(referenceCheckBox, 0, 0);
+        referenceSection.Controls.Add(referenceCard, 0, 1);
+        content.Controls.Add(referenceSection, 0, 6);
 
         var ledger = new TableLayoutPanel {
             Dock = DockStyle.Fill, BackColor = Paper, Padding = new Padding(0, 10, 0, 6),
@@ -119,7 +156,7 @@ internal sealed class SplitterForm : Form
         ledger.Controls.Add(balanceLabel, 0, 1);
         ledger.Controls.Add(progressBar, 0, 2);
         ledger.Controls.Add(statusLabel, 0, 3);
-        content.Controls.Add(ledger, 0, 6);
+        content.Controls.Add(ledger, 0, 7);
 
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Paper, ColumnCount = 2, RowCount = 1 };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
@@ -131,11 +168,14 @@ internal sealed class SplitterForm : Form
         generateButton.Dock = DockStyle.Fill;
         generateButton.Margin = new Padding(54, 6, 0, 8);
         actions.Controls.Add(outputButton, 0, 0); actions.Controls.Add(generateButton, 1, 0);
-        content.Controls.Add(actions, 0, 7);
+        content.Controls.Add(actions, 0, 8);
 
         outputPathLabel = MakeLabel("输出位置将在选择销售单后自动生成", BodyFont, Muted);
         outputPathLabel.Dock = DockStyle.Top; outputPathLabel.AutoEllipsis = true;
-        content.Controls.Add(outputPathLabel, 0, 8);
+        content.Controls.Add(outputPathLabel, 0, 9);
+
+        referenceAnimation = new System.Windows.Forms.Timer { Interval = 15 };
+        referenceAnimation.Tick += AnimateReferenceSection;
 
         try {
             workerPath = ExtractWorker();
@@ -230,6 +270,12 @@ internal sealed class SplitterForm : Form
             if (dialog.ShowDialog(this) == DialogResult.OK) SetSalesPath(dialog.FileName);
     }
 
+    private void ChooseReference(object sender, EventArgs e)
+    {
+        using (var dialog = new OpenFileDialog { Title = "选择服务费/赔偿引用表", Filter = "Excel 工作簿 (*.xlsx)|*.xlsx" })
+            if (dialog.ShowDialog(this) == DialogResult.OK) SetReferencePath(dialog.FileName);
+    }
+
     private void EnableExcelDrop(Control control, DragEventHandler dropHandler)
     {
         control.AllowDrop = true;
@@ -263,6 +309,12 @@ internal sealed class SplitterForm : Form
         if (path != null) SetSalesPath(path);
     }
 
+    private void DropReference(object sender, DragEventArgs e)
+    {
+        string path = DroppedExcelPath(e);
+        if (path != null) SetReferencePath(path);
+    }
+
     private void SetSalesPath(string path)
     {
         salesPath = path;
@@ -270,6 +322,44 @@ internal sealed class SplitterForm : Form
         outputPath = Path.Combine(Path.GetDirectoryName(salesPath), Path.GetFileNameWithoutExtension(salesPath) + "_已拆单价_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xlsx");
         outputPathLabel.Text = "输出：" + outputPath;
         UpdateReady();
+    }
+
+    private void SetReferencePath(string path)
+    {
+        referencePath = path;
+        ShowSelectedFile(referencePathLabel, referencePath);
+        UpdateReady();
+    }
+
+    private void ReferenceCheckedChanged(object sender, EventArgs e)
+    {
+        if (!referenceCheckBox.Checked) {
+            referencePath = "";
+            referencePathLabel.Text = "尚未选择引用表 · 也可将 .xlsx 拖到这里";
+            referencePathLabel.ForeColor = Muted;
+            referencePathLabel.BackColor = Color.FromArgb(246, 249, 250);
+            referencePathLabel.Font = new Font("Microsoft YaHei UI", 9.5F);
+            fileToolTip.SetToolTip(referencePathLabel, "");
+        } else {
+            referenceCard.Visible = true;
+        }
+        referenceAnimation.Start();
+        UpdateReady();
+    }
+
+    private void AnimateReferenceSection(object sender, EventArgs e)
+    {
+        float targetCard = referenceCheckBox.Checked ? 118F : 0F;
+        float current = referenceCardRow.Height;
+        float next = current < targetCard ? Math.Min(targetCard, current + 14F) : Math.Max(targetCard, current - 14F);
+        float delta = next - current;
+        referenceCardRow.Height = next;
+        referenceSectionRow.Height = 40F + next;
+        if (Math.Abs(delta) > 0.01F) Height = Math.Max(MinimumSize.Height, Height + (int)delta);
+        if (Math.Abs(next - targetCard) < 0.01F) {
+            referenceAnimation.Stop();
+            referenceCard.Visible = referenceCheckBox.Checked;
+        }
     }
 
     private async Task ImportRatioFile(string path)
@@ -327,7 +417,9 @@ internal sealed class SplitterForm : Form
     private void UpdateReady()
     {
         if (!string.IsNullOrEmpty(salesPath)) {
-            statusLabel.Text = "销售单已就绪";
+            statusLabel.Text = referenceCheckBox.Checked
+                ? (string.IsNullOrEmpty(referencePath) ? "销售单已就绪，请选择服务费/赔偿引用表" : "销售单和引用账单已就绪")
+                : "销售单已就绪（不引用服务费/赔偿账单）";
             balanceLabel.Text = "准备完成 · 点击“一键拆分并生成 Excel”";
         } else {
             statusLabel.Text = "基础库已内置，拖入销售单后开始拆分";
@@ -337,6 +429,7 @@ internal sealed class SplitterForm : Form
     private async void Generate(object sender, EventArgs e)
     {
         if (string.IsNullOrEmpty(salesPath)) { MessageBox.Show("请先选择或拖入销售单原表。", "还缺销售单", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        if (referenceCheckBox.Checked && string.IsNullOrEmpty(referencePath)) { MessageBox.Show("已勾选包含服务费/赔偿账单，请先选择或拖入引用表。", "还缺引用表", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         generateButton.Enabled = false; progressBar.Style = ProgressBarStyle.Continuous; progressBar.Value = 0;
         statusLabel.Text = "正在读取数据并按网店订单计算"; balanceLabel.Text = "正在核对 · 订单金额计算中  拆分计算中  差额计算中";
         bool succeeded = false;
@@ -366,7 +459,9 @@ internal sealed class SplitterForm : Form
 
     private Dictionary<string, string> RunWorker(Action<int, string> onProgress)
     {
-        return RunWorkerCommand(Quote(ratioPath) + " " + Quote(salesPath) + " " + Quote(outputPath), onProgress);
+        string arguments = Quote(ratioPath) + " " + Quote(salesPath) + " " + Quote(outputPath);
+        if (referenceCheckBox.Checked) arguments += " " + Quote(referencePath);
+        return RunWorkerCommand(arguments, onProgress);
     }
 
     private Dictionary<string, string> RunWorkerCommand(string arguments, Action<int, string> onProgress)

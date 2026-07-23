@@ -11,6 +11,7 @@ from typing import Callable, Iterable
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -57,14 +58,17 @@ RATIO_SCHEMAS = (
     ({"母件编号", "编号", "执行价格", "分摊金额", "分摊比例"}, "编号", "执行价格", "sheet1"),
 )
 RESULT_HEADERS = {
-    27: "组合装单价",  # AA
-    28: "占比",        # AB
-    29: "单价",        # AC
-    30: "金额",        # AD
-    34: "手续费1%",    # AH
-    35: "最终金额",    # AI
-    36: "摊后金额",    # AJ
+    15: "服务费",      # O
+    16: "手续费",      # P
+    17: "赔偿",        # Q
+    18: "需拆金额",    # R
+    31: "组合装单价",  # AE
+    32: "占比",        # AF
+    33: "单价",        # AG
+    34: "金额",        # AH
+    38: "摊后金额",    # AL
 }
+SPLIT_RESULT_COLUMNS = (31, 32, 33, 34, 38)
 
 
 def _text(value: object) -> str:
@@ -294,12 +298,14 @@ def update_ratio_data(
 
 def _copy_column_layout(sheet, old_layout: dict[int, dict[str, object]]) -> None:
     mapping: dict[int, int] = {}
-    for old_col in range(1, 27):
+    for old_col in range(1, 15):
         mapping[old_col] = old_col
-    for old_col in range(27, 30):
+    for old_col in range(15, 27):
         mapping[old_col] = old_col + 4
+    for old_col in range(27, 30):
+        mapping[old_col] = old_col + 8
     for old_col in range(30, 35):
-        mapping[old_col] = old_col + 7
+        mapping[old_col] = old_col + 9
 
     for old_col, new_col in mapping.items():
         props = old_layout.get(old_col, {})
@@ -307,7 +313,10 @@ def _copy_column_layout(sheet, old_layout: dict[int, dict[str, object]]) -> None
         for name, value in props.items():
             setattr(dim, name, value)
 
-    widths = {27: 16, 28: 15, 29: 16, 30: 16, 34: 13, 35: 13, 36: 16}
+    widths = {
+        15: 13, 16: 13, 17: 13, 18: 13,
+        31: 16, 32: 15, 33: 16, 34: 13, 38: 16,
+    }
     for col, width in widths.items():
         sheet.column_dimensions[get_column_letter(col)].width = width
 
@@ -327,22 +336,25 @@ def _capture_column_layout(sheet) -> dict[int, dict[str, object]]:
 
 
 def _style_new_columns(sheet, header_row: int) -> None:
-    source_style_col = 26  # Z
-    amount_style_col = 33  # AG, the original 金额 after the first insertion
-
     for row in range(1, sheet.max_row + 1):
-        source = sheet.cell(row, source_style_col)
-        for col in (27, 28, 29, 30):
+        adjustment_source = sheet.cell(row, 14)  # N 应收合计
+        for col in (15, 16, 17, 18):
             target = sheet.cell(row, col)
-            if source.has_style:
-                target._style = copy(source._style)
+            if adjustment_source.has_style:
+                target._style = copy(adjustment_source._style)
+
+        split_source = sheet.cell(row, 30)  # AD 原单价
+        for col in (31, 32, 33, 34):
+            target = sheet.cell(row, col)
+            if split_source.has_style:
+                target._style = copy(split_source._style)
             target.number_format = "0.00"
-        amount_source = sheet.cell(row, amount_style_col)
-        for col in (34, 35, 36):
-            target = sheet.cell(row, col)
-            if amount_source.has_style:
-                target._style = copy(amount_source._style)
-        sheet.cell(row, 36).number_format = "0.00"
+
+        amount_source = sheet.cell(row, 37)  # AK 原金额
+        target = sheet.cell(row, 38)
+        if amount_source.has_style:
+            target._style = copy(amount_source._style)
+        target.number_format = "0.00"
 
     header_fill = PatternFill("solid", fgColor="245C73")
     for col, title in RESULT_HEADERS.items():
@@ -358,9 +370,9 @@ def _extend_auto_filter(sheet, header_row: int) -> None:
         if ":" in ref:
             start, end = ref.split(":", 1)
             end_row = "".join(ch for ch in end if ch.isdigit()) or str(sheet.max_row)
-            sheet.auto_filter.ref = f"{start}:AO{end_row}"
+            sheet.auto_filter.ref = f"{start}:AQ{end_row}"
             return
-    sheet.auto_filter.ref = f"A{header_row}:AO{sheet.max_row}"
+    sheet.auto_filter.ref = f"A{header_row}:AQ{sheet.max_row}"
 
 
 def _refresh_pivots_on_open(workbook) -> None:
@@ -430,14 +442,79 @@ def _load_cached_order_amounts(cached_workbook) -> dict[str, float]:
     return order_amounts
 
 
+def _load_reference_adjustments(reference_path: str | Path) -> dict[str, tuple[float, float]]:
+    path = Path(reference_path)
+    if path.suffix.lower() != ".xlsx":
+        raise SplitterError("服务费/赔偿引用表必须是 .xlsx 文件。")
+    try:
+        formula_book = load_workbook(path, data_only=False, read_only=True, keep_links=False)
+        cached_book = load_workbook(path, data_only=True, read_only=True, keep_links=False)
+    except Exception as exc:
+        raise SplitterError(f"无法打开服务费/赔偿引用表：{exc}") from exc
+
+    try:
+        selected = None
+        for formula_sheet in formula_book.worksheets:
+            for header_row in range(1, min(formula_sheet.max_row, 5) + 1):
+                headers = _header_map(formula_sheet, header_row)
+                compensation_header = next(
+                    (name for name in ("补偿", "赔偿") if name in headers), None
+                )
+                if {"订单号", "服务费"}.issubset(headers) and compensation_header:
+                    selected = (
+                        formula_sheet,
+                        cached_book[formula_sheet.title],
+                        header_row,
+                        headers["订单号"],
+                        headers["服务费"],
+                        headers[compensation_header],
+                    )
+                    break
+            if selected:
+                break
+        if selected is None:
+            raise SplitterError(
+                "服务费/赔偿引用表中未找到同时包含“订单号、服务费、补偿/赔偿”的明细表。"
+            )
+
+        formula_sheet, cached_sheet, header_row, order_col, service_col, compensation_col = selected
+        totals: dict[str, list[float]] = {}
+        for row in range(header_row + 1, formula_sheet.max_row + 1):
+            order = _text(cached_sheet.cell(row, order_col).value)
+            if not order:
+                continue
+            values = []
+            for column, label in (
+                (service_col, "服务费"),
+                (compensation_col, "补偿/赔偿"),
+            ):
+                formula = formula_sheet.cell(row, column).value
+                cached = cached_sheet.cell(row, column).value
+                if isinstance(formula, str) and formula.startswith("=") and cached is None:
+                    raise SplitterError(
+                        f"引用表第 {row} 行{label}公式没有缓存值，请先用 Excel/WPS 打开并保存引用表后再上传。"
+                    )
+                values.append(
+                    0.0 if _text(cached) == "" else _number(cached, f"引用表第 {row} 行{label}")
+                )
+            current = totals.setdefault(order, [0.0, 0.0])
+            current[0] += values[0]
+            current[1] += values[1]
+        return {order: (values[0], values[1]) for order, values in totals.items()}
+    finally:
+        formula_book.close()
+        cached_book.close()
+
+
 def _prepare_result_sheet(workbook, source_sheet, header_row: int):
     old_layout = _capture_column_layout(source_sheet)
     if "拆分结果" in workbook.sheetnames:
         workbook.remove(workbook["拆分结果"])
     result_sheet = workbook.copy_worksheet(source_sheet)
     result_sheet.title = "拆分结果"
-    result_sheet.insert_cols(27, amount=4)
-    result_sheet.insert_cols(34, amount=3)
+    result_sheet.insert_cols(15, amount=4)
+    result_sheet.insert_cols(31, amount=4)
+    result_sheet.insert_cols(38, amount=1)
     _copy_column_layout(result_sheet, old_layout)
     _style_new_columns(result_sheet, header_row)
     _extend_auto_filter(result_sheet, header_row)
@@ -445,23 +522,23 @@ def _prepare_result_sheet(workbook, source_sheet, header_row: int):
 
 
 def _zero_targets(sheet, row: int) -> None:
-    for col in RESULT_HEADERS:
+    for col in SPLIT_RESULT_COLUMNS:
         sheet.cell(row, col, 0.0)
 
 
 def _write_result_formulas(sheet, header_row: int) -> None:
     for row in range(header_row + 1, sheet.max_row + 1):
-        if all(sheet.cell(row, col).value is None for col in range(1, 27)):
+        if all(sheet.cell(row, col).value is None for col in range(1, 15)):
             continue
-        sheet.cell(row, 34, f"=AG{row}*1%")
-        sheet.cell(row, 35, f"=N{row}-AH{row}")
+        sheet.cell(row, 16, f"=N{row}*1%")
+        sheet.cell(row, 18, f"=N{row}-O{row}-P{row}-Q{row}")
 
 
-def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amounts: dict[str, float]):
+def _prepare_summary_sheet(workbook, result_sheet, header_row: int):
     if "透视表" in workbook.sheetnames:
         workbook.remove(workbook["透视表"])
     summary = workbook.create_sheet("透视表")
-    summary.append(["网店订单号", "平均值项:应收合计", "求和项:金额", "差异"])
+    summary.append(["网店订单号", "平均值项:需拆金额", "求和项:金额", "差异"])
 
     totals: OrderedDict[str, dict[str, object]] = OrderedDict()
     for row in range(header_row + 1, result_sheet.max_row + 1):
@@ -469,43 +546,52 @@ def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amount
         if not order:
             continue
         entry = totals.setdefault(
-            order, {"receivables": [], "allocated": 0.0, "fee_base": 0.0}
+            order,
+            {
+                "receivables": [],
+                "services": [],
+                "compensations": [],
+                "allocated": 0.0,
+            },
         )
-        value = result_sheet.cell(row, 14).value
-        if _text(value) != "":
-            try:
-                entry["receivables"].append(_number(value, f"第 {row} 行应收合计"))
-            except ValueError:
-                pass
-        allocated = result_sheet.cell(row, 30).value
+        for name, column, label in (
+            ("receivables", 14, "应收合计"),
+            ("services", 15, "服务费"),
+            ("compensations", 17, "赔偿"),
+        ):
+            value = result_sheet.cell(row, column).value
+            if _text(value) != "":
+                try:
+                    entry[name].append(_number(value, f"第 {row} 行{label}"))
+                except ValueError:
+                    pass
+        allocated = result_sheet.cell(row, 34).value
         if _text(allocated) != "":
             try:
                 entry["allocated"] += _number(allocated, f"第 {row} 行拆分金额")
-            except ValueError:
-                pass
-        original_amount = result_sheet.cell(row, 33).value
-        if _text(original_amount) != "":
-            try:
-                entry["fee_base"] += _number(original_amount, f"第 {row} 行原金额")
             except ValueError:
                 pass
 
     for order in sorted(totals):
         entry = totals[order]
         receivables = entry["receivables"]
-        target = order_amounts.get(order)
-        if target is None:
-            target = (
-                receivables[0] - entry["fee_base"] * 0.01
-                if receivables
-                and all(abs(value - receivables[0]) <= 1e-9 for value in receivables[1:])
-                else 0.0
-            )
+        services = entry["services"]
+        compensations = entry["compensations"]
+        consistent = all(
+            values
+            and all(abs(value - values[0]) <= 1e-9 for value in values[1:])
+            for values in (receivables, services, compensations)
+        )
+        target = (
+            receivables[0] - services[0] - receivables[0] * 0.01 - compensations[0]
+            if consistent
+            else 0.0
+        )
         row = summary.max_row + 1
         summary.cell(row, 1, order)
         summary.cell(row, 2, target)
         summary.cell(row, 3, entry["allocated"])
-        summary.cell(row, 4, f"=C{row}-B{row}")
+        summary.cell(row, 4, f"=B{row}-C{row}")
 
     total_row = summary.max_row + 1
     summary.cell(total_row, 1, "总计")
@@ -515,7 +601,7 @@ def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amount
     else:
         summary.cell(total_row, 2, f"=SUM(B2:B{total_row - 1})")
         summary.cell(total_row, 3, f"=SUM(C2:C{total_row - 1})")
-    summary.cell(total_row, 4, f"=C{total_row}-B{total_row}")
+    summary.cell(total_row, 4, f"=B{total_row}-C{total_row}")
 
     header_fill = PatternFill("solid", fgColor="245C73")
     for cell in summary[1]:
@@ -538,6 +624,8 @@ def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amount
 
 
 def _enable_formula_recalculation(workbook) -> None:
+    if workbook.calculation is None:
+        workbook.calculation = CalcProperties()
     workbook.calculation.calcMode = "auto"
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
@@ -548,6 +636,7 @@ def _calculate_rows(
     header_row: int,
     prices: OrderedDict[str, float],
     order_amounts: dict[str, float],
+    adjustments: dict[str, tuple[float, float]],
     order_progress: OrderProgressCallback | None = None,
 ) -> SplitStats:
     headers = _header_map(sheet, header_row)
@@ -570,7 +659,7 @@ def _calculate_rows(
 
     groups: OrderedDict[str, list[int]] = OrderedDict()
     for row in range(header_row + 1, sheet.max_row + 1):
-        if all(sheet.cell(row, col).value is None for col in range(1, 27)):
+        if all(sheet.cell(row, col).value is None for col in range(1, 31)):
             continue
         order_number = _text(sheet.cell(row, order_col).value)
         web_order_number = _text(sheet.cell(row, web_order_col).value)
@@ -582,6 +671,10 @@ def _calculate_rows(
     for order_index, (group_key, rows) in enumerate(groups.items(), start=1):
         invalid_reason: str | None = None
         display_order = group_key.replace("__ROW_", "第 ")
+        service_fee, compensation = adjustments.get(group_key, (0.0, 0.0))
+        for row in rows:
+            sheet.cell(row, 15, service_fee)
+            sheet.cell(row, 17, compensation)
 
         original_amounts: dict[int, float] = {}
         try:
@@ -631,8 +724,8 @@ def _calculate_rows(
                 order_progress(order_index, total_orders)
             continue
 
-        target_total = order_amounts.get(group_key, 0.0) if order_amounts else None
-        if target_total is None:
+        gross_total = order_amounts.get(group_key, 0.0) if order_amounts else None
+        if gross_total is None:
             order_totals: list[float] = []
             try:
                 for row in rows:
@@ -649,7 +742,16 @@ def _calculate_rows(
             elif any(abs(value - order_totals[0]) > 1e-9 for value in order_totals[1:]):
                 invalid_reason = "同一网店订单存在多个不同的应收合计"
             else:
-                target_total = order_totals[0] - sum(original_amounts.values()) * 0.01
+                gross_total = order_totals[0]
+        else:
+            for row in rows:
+                sheet.cell(row, total_col, gross_total)
+
+        target_total = (
+            gross_total - service_fee - gross_total * 0.01 - compensation
+            if gross_total is not None
+            else 0.0
+        )
 
         if invalid_reason is not None:
             stats.exceptional_orders += 1
@@ -698,11 +800,11 @@ def _calculate_rows(
                 )
                 allocated_total += ad
                 ac = ad / quantities[row]
-                sheet.cell(row, 27, 0.0)
-                sheet.cell(row, 28, 0.0)
-                sheet.cell(row, 29, ac)
-                sheet.cell(row, 30, ad)
-                sheet.cell(row, 36, ad)
+                sheet.cell(row, 31, 0.0)
+                sheet.cell(row, 32, 0.0)
+                sheet.cell(row, 33, ac)
+                sheet.cell(row, 34, ad)
+                sheet.cell(row, 38, ad)
             if order_progress:
                 order_progress(order_index, total_orders)
             continue
@@ -723,11 +825,11 @@ def _calculate_rows(
             )
             allocated_total += ad
             ac = ad / quantity
-            sheet.cell(row, 27, aa)
-            sheet.cell(row, 28, ab)
-            sheet.cell(row, 29, ac)
-            sheet.cell(row, 30, ad)
-            sheet.cell(row, 36, ad)
+            sheet.cell(row, 31, aa)
+            sheet.cell(row, 32, ab)
+            sheet.cell(row, 33, ac)
+            sheet.cell(row, 34, ad)
+            sheet.cell(row, 38, ad)
 
         if order_progress:
             order_progress(order_index, total_orders)
@@ -740,6 +842,7 @@ def process_workbooks(
     sales_path: str | Path,
     output_path: str | Path,
     progress: ProgressCallback | None = None,
+    reference_path: str | Path | None = None,
 ) -> SplitStats:
     """Generate a numeric result workbook that mirrors the reference formulas."""
 
@@ -750,18 +853,31 @@ def process_workbooks(
     ratio_path = Path(ratio_path)
     sales_path = Path(sales_path)
     output_path = Path(output_path)
+    reference_path = Path(reference_path) if reference_path else None
     if ratio_path.resolve() == sales_path.resolve():
         raise SplitterError("组合装占比表和销售单不能是同一个文件。")
     if sales_path.suffix.lower() != ".xlsx":
         raise SplitterError("销售单必须是 .xlsx 文件。")
     if output_path.suffix.lower() != ".xlsx":
         raise SplitterError("输出文件必须使用 .xlsx 扩展名。")
-    if output_path.resolve() in {ratio_path.resolve(), sales_path.resolve()}:
+    source_paths = {ratio_path.resolve(), sales_path.resolve()}
+    if reference_path is not None:
+        if reference_path.suffix.lower() != ".xlsx":
+            raise SplitterError("服务费/赔偿引用表必须是 .xlsx 文件。")
+        if reference_path.resolve() in source_paths:
+            raise SplitterError("服务费/赔偿引用表不能与基础表或销售单使用同一个文件。")
+        source_paths.add(reference_path.resolve())
+    if output_path.resolve() in source_paths:
         raise SplitterError("输出文件不能覆盖上传的源文件。")
 
     report(10, "读取组合装拆分占比表")
     prices, _ = _load_ratio_prices(ratio_path)
     report(30, f"已载入 {len(prices)} 个首匹配单品")
+    adjustments = (
+        _load_reference_adjustments(reference_path) if reference_path is not None else {}
+    )
+    if reference_path is not None:
+        report(35, f"已汇总 {len(adjustments)} 个服务费/赔偿订单")
 
     try:
         workbook = load_workbook(sales_path, data_only=False, keep_links=False)
@@ -785,13 +901,14 @@ def process_workbooks(
             header_row,
             prices,
             order_amounts,
+            adjustments,
             order_progress=lambda done, total: report(
                 60 + int((done / total) * 28) if total else 88,
                 f"正在拆分订单 {done}/{total}",
             ),
         )
         _write_result_formulas(result_sheet, header_row)
-        _prepare_summary_sheet(workbook, result_sheet, header_row, order_amounts)
+        _prepare_summary_sheet(workbook, result_sheet, header_row)
         _enable_formula_recalculation(workbook)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)

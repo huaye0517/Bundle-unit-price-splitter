@@ -17,7 +17,7 @@ SALES = Path(os.environ.get("BUNDLE_SPLITTER_SALES_SAMPLE", "__missing_sales_sam
 
 @unittest.skipUnless(RATIO.exists() and SALES.exists(), "样例 Excel 不在当前电脑")
 class RealSampleTests(unittest.TestCase):
-    def test_cached_order_total_drives_ad_and_aj(self):
+    def test_cached_order_total_drives_ah_and_al(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "sample-output.xlsx"
             original = load_workbook(SALES, data_only=True, read_only=True)
@@ -54,8 +54,6 @@ class RealSampleTests(unittest.TestCase):
             if not expected_totals:
                 web_order_col = source_headers["网店订单号"]
                 order_col = source_headers["订单编号"]
-                amount_col = source_headers["金额"]
-                fee_bases = defaultdict(float)
                 for values in source.iter_rows(min_row=header_row + 1, values_only=True):
                     order = str(
                         values[web_order_col - 1] or values[order_col - 1] or ""
@@ -63,15 +61,14 @@ class RealSampleTests(unittest.TestCase):
                     amount = values[receivable_col - 1]
                     if not order:
                         continue
-                    fee_bases[order] += float(values[amount_col - 1] or 0)
                     if amount is not None:
                         amount = float(amount)
                         if order in expected_totals:
                             self.assertAlmostEqual(expected_totals[order], amount, places=8)
                         else:
                             expected_totals[order] = amount
-                for order in expected_totals:
-                    expected_totals[order] -= fee_bases[order] * 0.01
+            for order in expected_totals:
+                expected_totals[order] *= 0.99
             original.close()
 
             stats = process_workbooks(RATIO, SALES, output)
@@ -90,23 +87,23 @@ class RealSampleTests(unittest.TestCase):
             ]
             self.assertEqual(output_receivables, original_receivables)
 
-            ad_totals = defaultdict(float)
             ah_totals = defaultdict(float)
+            al_totals = defaultdict(float)
             for row in result.iter_rows(min_row=2, values_only=True):
-                self.assertAlmostEqual(float(row[29] or 0), float(row[35] or 0), places=8)
-                if float(row[32] or 0) == 0:
-                    self.assertEqual(float(row[26] or 0), 0)
-                    self.assertEqual(float(row[29] or 0), 0)
-                    self.assertEqual(float(row[35] or 0), 0)
+                self.assertAlmostEqual(float(row[33] or 0), float(row[37] or 0), places=8)
+                if float(row[36] or 0) == 0:
+                    self.assertEqual(float(row[30] or 0), 0)
+                    self.assertEqual(float(row[33] or 0), 0)
+                    self.assertEqual(float(row[37] or 0), 0)
                 order = str(row[10] or row[1] or "").strip()
                 if order:
-                    ad_totals[order] += float(row[29] or 0)
-                    ah_totals[order] += float(row[35] or 0)
-            self.assertEqual(set(ad_totals), set(ah_totals))
-            for order in ad_totals:
+                    ah_totals[order] += float(row[33] or 0)
+                    al_totals[order] += float(row[37] or 0)
+            self.assertEqual(set(ah_totals), set(al_totals))
+            for order in ah_totals:
                 total = expected_totals.get(order, 0.0)
-                self.assertAlmostEqual(ad_totals[order], total, places=8)
                 self.assertAlmostEqual(ah_totals[order], total, places=8)
+                self.assertAlmostEqual(al_totals[order], total, places=8)
             wb.close()
 
 
