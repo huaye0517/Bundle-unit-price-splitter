@@ -443,7 +443,7 @@ class SplitterTests(unittest.TestCase):
 
             stats = process_workbooks(ratio, sales, output)
 
-            self.assertEqual(stats.orders, 2)
+            self.assertEqual(stats.orders, 1)
             self.assertEqual(stats.exceptional_orders, 0)
             result = load_workbook(output, data_only=True)["拆分结果"]
             self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 130, places=12)
@@ -574,6 +574,52 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(summary["A2"].value, "WEB-SHARED")
             self.assertAlmostEqual(summary["B2"].value, 148.5, places=12)
             self.assertAlmostEqual(summary["C2"].value, 148.5, places=12)
+            result_book.close()
+
+    def test_same_logistics_number_uses_receivable_once_across_web_orders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_new_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for web_order, code, amount in (
+                ("WEB-A", "SKU1", 40),
+                ("WEB-B", "SKU2", 60),
+            ):
+                row = [""] * len(SALES_HEADERS)
+                row[1] = "ORDER-SHARED"
+                row[9] = "TRACKING-SHARED"
+                row[10] = web_order
+                row[13] = 100
+                row[21] = code
+                row[24] = 1
+                row[25] = amount
+                row[28] = amount
+                row[30] = "原组合装名称:测试,编号:a;"
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.orders, 1)
+            self.assertEqual(stats.exceptional_orders, 0)
+            result_book = load_workbook(output, data_only=True)
+            result = result_book["拆分结果"]
+            self.assertAlmostEqual(result["AD2"].value, 39.6, places=12)
+            self.assertAlmostEqual(result["AD3"].value, 59.4, places=12)
+            self.assertLessEqual(result["AC2"].value, result["Z2"].value)
+            self.assertLessEqual(result["AC3"].value, result["Z3"].value)
+            summary = result_book["透视表"]
+            self.assertEqual(summary["A2"].value, "WEB-A")
+            self.assertAlmostEqual(summary["B2"].value, 39.6, places=12)
+            self.assertAlmostEqual(summary["C2"].value, 39.6, places=12)
+            self.assertEqual(summary["A3"].value, "WEB-B")
+            self.assertAlmostEqual(summary["B3"].value, 59.4, places=12)
+            self.assertAlmostEqual(summary["C3"].value, 59.4, places=12)
             result_book.close()
 
     def test_partial_parent_ratio_normalizes_and_missing_pair_uses_z(self):

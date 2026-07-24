@@ -648,6 +648,7 @@ def _calculate_rows(
     # These columns are unchanged by insertions because they all sit at or before Z.
     required = {
         "订单编号",
+        "物流单号",
         "网店订单号",
         "应收合计",
         "货品编号",
@@ -661,6 +662,7 @@ def _calculate_rows(
         raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
 
     order_col = headers["订单编号"]
+    logistics_col = headers["物流单号"]
     web_order_col = headers["网店订单号"]
     total_col = headers["应收合计"]
     item_col = headers["货品编号"]
@@ -677,13 +679,17 @@ def _calculate_rows(
     for row in range(header_row + 1, sheet.max_row + 1):
         if all(sheet.cell(row, col).value is None for col in range(1, 27)):
             continue
+        logistics_number = _text(sheet.cell(row, logistics_col).value)
         order_number = _text(sheet.cell(row, order_col).value)
         web_order_number = _text(sheet.cell(row, web_order_col).value)
-        key = (
-            (web_order_number, order_number, 0)
-            if order_number or web_order_number
-            else ("", "", row)
-        )
+        if logistics_number:
+            key = ("物流单号", logistics_number, 0)
+        elif order_number:
+            key = ("订单编号", order_number, 0)
+        elif web_order_number:
+            key = ("网店订单号", web_order_number, 0)
+        else:
+            key = ("单行", "", row)
         groups.setdefault(key, []).append(row)
 
     stats = SplitStats(orders=len(groups), rows=sum(len(rows) for rows in groups.values()))
@@ -733,26 +739,25 @@ def _calculate_rows(
                     "应收合计为空或公式没有缓存值，请先用 Excel/WPS 打开并保存源文件后再上传"
                 )
             elif any(abs(value - receivables[0]) > 1e-9 for value in receivables[1:]):
-                invalid_reason = "同一订单编号存在多个不同的应收合计"
+                invalid_reason = f"同一{group_key[0]}存在多个不同的应收合计"
 
-        web_orders = {
-            _text(sheet.cell(row, web_order_col).value)
-            for row in rows
-            if _text(sheet.cell(row, web_order_col).value)
-        }
-        if len(web_orders) > 1 and invalid_reason is None:
-            invalid_reason = "同一订单编号存在多个不同的网店订单号"
-        web_order = next(iter(web_orders), "")
+        web_orders = tuple(
+            dict.fromkeys(
+                _text(sheet.cell(row, web_order_col).value)
+                for row in rows
+                if _text(sheet.cell(row, web_order_col).value)
+            )
+        )
         group_data[group_key] = {
             "rows": rows,
-            "web_order": web_order,
+            "web_orders": web_orders,
             "original_amounts": original_amounts,
             "unit_prices": unit_prices,
             "quantities": quantities,
             "receivable": receivables[0] if receivables else 0.0,
             "invalid_reason": invalid_reason,
         }
-        if web_order:
+        for web_order in web_orders:
             web_groups.setdefault(web_order, []).append(group_key)
 
     group_targets: dict[tuple[str, str, int], float] = {}
@@ -762,6 +767,8 @@ def _calculate_rows(
                 data["original_amounts"].values()
             ) * 0.01
 
+    external_group_targets: dict[tuple[str, str, int], float] = {}
+    externally_covered_orders: dict[tuple[str, str, int], set[str]] = {}
     for web_order, external_total in order_amounts.items():
         valid_keys = [
             key
@@ -786,15 +793,21 @@ def _calculate_rows(
                 if index == len(valid_keys) - 1
                 else external_total * weight / total_weight
             )
-            group_targets[key] = target
+            external_group_targets[key] = external_group_targets.get(key, 0.0) + target
+            externally_covered_orders.setdefault(key, set()).add(web_order)
             allocated += target
 
-    web_targets: OrderedDict[str, float] = OrderedDict()
+    for key, target in external_group_targets.items():
+        if set(group_data[key]["web_orders"]).issubset(
+            externally_covered_orders.get(key, set())
+        ):
+            group_targets[key] = target
+
     total_orders = len(groups)
     for order_index, (group_key, rows) in enumerate(groups.items(), start=1):
         data = group_data[group_key]
         invalid_reason = data["invalid_reason"]
-        display_order = group_key[1] or group_key[0] or f"第 {group_key[2]} 行"
+        display_order = group_key[1] or f"第 {group_key[2]} 行"
         if invalid_reason:
             stats.exceptional_orders += 1
             stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
@@ -808,9 +821,6 @@ def _calculate_rows(
         unit_prices: dict[int, float] = data["unit_prices"]
         quantities: dict[int, float] = data["quantities"]
         target_total = group_targets[group_key]
-        web_order = str(data["web_order"])
-        if web_order:
-            web_targets[web_order] = web_targets.get(web_order, 0.0) + target_total
 
         eligible_rows: list[int] = []
         for row in rows:
@@ -1006,6 +1016,14 @@ def _calculate_rows(
 
         if order_progress:
             order_progress(order_index, total_orders)
+
+    web_targets: OrderedDict[str, float] = OrderedDict()
+    for row in range(header_row + 1, sheet.max_row + 1):
+        web_order = _text(sheet.cell(row, web_order_col).value)
+        if web_order:
+            web_targets[web_order] = web_targets.get(web_order, 0.0) + float(
+                sheet.cell(row, 30).value or 0.0
+            )
 
     return stats, web_targets
 
