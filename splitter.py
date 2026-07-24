@@ -5,6 +5,7 @@ from copy import copy
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import Callable, Iterable
 
@@ -41,6 +42,21 @@ class RatioUpdateStats:
     unique_items: int
 
 
+@dataclass(frozen=True)
+class RatioEntry:
+    price: float
+    ratio: float
+    row: int
+
+
+@dataclass
+class RatioData:
+    prices: OrderedDict[str, float]
+    pairs: dict[tuple[str, str], RatioEntry]
+    source_rows: int
+    has_parent_ratios: bool
+
+
 SALES_HEADERS = {
     "订单编号",
     "应收合计",
@@ -54,8 +70,22 @@ SALES_HEADERS = {
 }
 
 RATIO_SCHEMAS = (
-    ({"单品编号", "金额", "分摊比例", "单价"}, "单品编号", "单价", "Sheet2"),
-    ({"母件编号", "编号", "执行价格", "分摊金额", "分摊比例"}, "编号", "执行价格", "sheet1"),
+    (
+        {"单品编号", "金额", "分摊比例", "单价"},
+        "单品编号",
+        "单价",
+        "",
+        "",
+        "Sheet2",
+    ),
+    (
+        {"母件编号", "编号", "执行价格", "分摊金额", "分摊比例"},
+        "编号",
+        "执行价格",
+        "母件编号",
+        "分摊比例",
+        "sheet1",
+    ),
 )
 RESULT_HEADERS = {
     27: "组合装单价",  # AA
@@ -118,14 +148,28 @@ def _header_map(sheet, header_row: int) -> dict[str, int]:
 
 
 def _ratio_sheet_info(workbook):
-    for required, code_header, price_header, preferred in RATIO_SCHEMAS:
+    for (
+        required,
+        code_header,
+        price_header,
+        mother_header,
+        ratio_header,
+        preferred,
+    ) in RATIO_SCHEMAS:
         sheet, header_row = _find_sheet(workbook, required, preferred)
         if sheet is not None:
-            return sheet, header_row, code_header, price_header
-    return None, None, "", ""
+            return (
+                sheet,
+                header_row,
+                code_header,
+                price_header,
+                mother_header,
+                ratio_header,
+            )
+    return None, None, "", "", "", ""
 
 
-def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float], int]:
+def _load_ratio_data(ratio_path: str | Path) -> RatioData:
     path = Path(ratio_path)
     if path.suffix.lower() != ".xlsx":
         raise SplitterError("组合装拆分占比表必须是 .xlsx 文件。")
@@ -137,7 +181,14 @@ def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float],
         raise SplitterError(f"无法打开组合装拆分占比表：{exc}") from exc
 
     try:
-        value_sheet, header_row, code_header, price_header = _ratio_sheet_info(values_book)
+        (
+            value_sheet,
+            header_row,
+            code_header,
+            price_header,
+            mother_header,
+            ratio_header,
+        ) = _ratio_sheet_info(values_book)
         if value_sheet is None:
             raise SplitterError(
                 "占比表中未找到可识别的工作表。支持旧版“单品编号、金额、分摊比例、单价”，"
@@ -147,9 +198,12 @@ def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float],
         headers = _header_map(value_sheet, header_row)
         code_col = headers[code_header]
         price_col = headers[price_header]
+        mother_col = headers[mother_header] if mother_header else None
+        ratio_col = headers[ratio_header] if ratio_header else None
 
         prices: OrderedDict[str, float] = OrderedDict()
-        missing_cache: list[int] = []
+        pairs: dict[tuple[str, str], RatioEntry] = {}
+        missing_cache: list[tuple[int, str]] = []
         source_rows = 0
         value_rows = value_sheet.iter_rows(min_row=header_row + 1, values_only=True)
         formula_rows = formula_sheet.iter_rows(min_row=header_row + 1, values_only=True)
@@ -164,35 +218,72 @@ def _load_ratio_prices(ratio_path: str | Path) -> tuple[OrderedDict[str, float],
             if item_code == _code(code_header) and _text(cached_value) == price_header:
                 continue
             source_rows += 1
-            # VLOOKUP returns the first occurrence, so later duplicates are ignored.
-            if item_code in prices:
-                continue
             formula_value = formulas[price_col - 1]
             if cached_value is None and isinstance(formula_value, str) and formula_value.startswith("="):
-                missing_cache.append(row)
+                missing_cache.append((row, price_header))
                 continue
             try:
-                prices[item_code] = _number(cached_value, f"占比表第 {row} 行{price_header}")
+                price = _number(cached_value, f"占比表第 {row} 行{price_header}")
+            except ValueError as exc:
+                raise SplitterError(str(exc)) from exc
+            prices.setdefault(item_code, price)
+
+            if mother_col is None or ratio_col is None:
+                continue
+
+            mother_code = _code(values[mother_col - 1])
+            if not mother_code:
+                raise SplitterError(f"占比表第 {row} 行母件编号为空。")
+            ratio_value = values[ratio_col - 1]
+            ratio_formula = formulas[ratio_col - 1]
+            if ratio_value is None and isinstance(ratio_formula, str) and ratio_formula.startswith("="):
+                missing_cache.append((row, ratio_header))
+                continue
+            try:
+                ratio = _number(ratio_value, f"占比表第 {row} 行{ratio_header}")
             except ValueError as exc:
                 raise SplitterError(str(exc)) from exc
 
+            key = (mother_code, item_code)
+            existing = pairs.get(key)
+            if existing is not None:
+                if (
+                    abs(existing.price - price) > 1e-9
+                    or abs(existing.ratio - ratio) > 1e-9
+                ):
+                    raise SplitterError(
+                        f"占比表母件 {mother_code}、子件 {item_code} 在第 "
+                        f"{existing.row} 行和第 {row} 行存在不同的执行价格或分摊比例。"
+                    )
+                continue
+            pairs[key] = RatioEntry(price, ratio, row)
+
         if missing_cache:
-            preview = "、".join(map(str, missing_cache[:8]))
+            preview = "、".join(
+                f"{row} 行{header}" for row, header in missing_cache[:8]
+            )
             raise SplitterError(
-                f"占比表 {get_column_letter(price_col)} 列公式没有可读取的计算结果（第 {preview} 行）。"
+                f"占比表公式没有可读取的计算结果（第 {preview}）。"
                 "请先用 Excel 打开该文件，完成计算并保存后再试。"
             )
         if not prices:
             raise SplitterError("占比表没有可用的子件编号和拆分单价。")
-        return prices, source_rows
+        if mother_col is not None and not pairs:
+            raise SplitterError("占比表没有可用的母件编号、子件编号和分摊比例。")
+        return RatioData(
+            prices=prices,
+            pairs=pairs,
+            source_rows=source_rows,
+            has_parent_ratios=mother_col is not None,
+        )
     finally:
         values_book.close()
         formulas_book.close()
 
 
 def ratio_file_info(ratio_path: str | Path) -> tuple[int, int]:
-    prices, source_rows = _load_ratio_prices(ratio_path)
-    return len(prices), source_rows
+    ratio_data = _load_ratio_data(ratio_path)
+    return len(ratio_data.prices), ratio_data.source_rows
 
 
 def update_ratio_data(
@@ -222,8 +313,22 @@ def update_ratio_data(
         raise SplitterError(f"无法打开基础数据文件：{exc}") from exc
 
     try:
-        base_sheet, base_header_row, base_code_header, base_price_header = _ratio_sheet_info(base_book)
-        new_sheet, new_header_row, new_code_header, new_price_header = _ratio_sheet_info(incoming_book)
+        (
+            base_sheet,
+            base_header_row,
+            base_code_header,
+            base_price_header,
+            _,
+            _,
+        ) = _ratio_sheet_info(base_book)
+        (
+            new_sheet,
+            new_header_row,
+            new_code_header,
+            new_price_header,
+            _,
+            _,
+        ) = _ratio_sheet_info(incoming_book)
         if base_sheet is None or new_sheet is None:
             raise SplitterError("新增文件中未找到可识别的组合装数据工作表。")
 
@@ -458,54 +563,35 @@ def _write_result_formulas(sheet, header_row: int) -> None:
         sheet.cell(row, 35, f"=N{row}-AH{row}")
 
 
-def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amounts: dict[str, float]):
+def _prepare_summary_sheet(
+    workbook,
+    result_sheet,
+    header_row: int,
+    web_targets: OrderedDict[str, float],
+):
     if "透视表" in workbook.sheetnames:
         workbook.remove(workbook["透视表"])
     summary = workbook.create_sheet("透视表")
     summary.append(["网店订单号", "平均值项:应收合计", "求和项:金额", "差异"])
 
-    totals: OrderedDict[str, dict[str, object]] = OrderedDict()
+    totals: OrderedDict[str, float] = OrderedDict()
     for row in range(header_row + 1, result_sheet.max_row + 1):
         order = _text(result_sheet.cell(row, 11).value)
         if not order:
             continue
-        entry = totals.setdefault(
-            order, {"receivables": [], "allocated": 0.0, "fee_base": 0.0}
-        )
-        value = result_sheet.cell(row, 14).value
-        if _text(value) != "":
-            try:
-                entry["receivables"].append(_number(value, f"第 {row} 行应收合计"))
-            except ValueError:
-                pass
+        totals.setdefault(order, 0.0)
         allocated = result_sheet.cell(row, 30).value
         if _text(allocated) != "":
             try:
-                entry["allocated"] += _number(allocated, f"第 {row} 行拆分金额")
-            except ValueError:
-                pass
-        original_amount = result_sheet.cell(row, 33).value
-        if _text(original_amount) != "":
-            try:
-                entry["fee_base"] += _number(original_amount, f"第 {row} 行原金额")
+                totals[order] += _number(allocated, f"第 {row} 行拆分金额")
             except ValueError:
                 pass
 
-    for order in sorted(totals):
-        entry = totals[order]
-        receivables = entry["receivables"]
-        target = order_amounts.get(order)
-        if target is None:
-            target = (
-                receivables[0] - entry["fee_base"] * 0.01
-                if receivables
-                and all(abs(value - receivables[0]) <= 1e-9 for value in receivables[1:])
-                else 0.0
-            )
+    for order in sorted(set(totals) | set(web_targets)):
         row = summary.max_row + 1
         summary.cell(row, 1, order)
-        summary.cell(row, 2, target)
-        summary.cell(row, 3, entry["allocated"])
+        summary.cell(row, 2, web_targets.get(order, 0.0))
+        summary.cell(row, 3, totals.get(order, 0.0))
         summary.cell(row, 4, f"=C{row}-B{row}")
 
     total_row = summary.max_row + 1
@@ -546,16 +632,30 @@ def _enable_formula_recalculation(workbook) -> None:
     workbook.calculation.forceFullCalc = True
 
 
+def _mother_code(note: object) -> str:
+    match = re.search(r"编号\s*[:：]\s*([^;；,，\s]+)", _text(note), re.IGNORECASE)
+    return _code(match.group(1)) if match else ""
+
+
 def _calculate_rows(
     sheet,
     header_row: int,
-    prices: OrderedDict[str, float],
+    ratio_data: RatioData,
     order_amounts: dict[str, float],
     order_progress: OrderProgressCallback | None = None,
-) -> SplitStats:
+) -> tuple[SplitStats, OrderedDict[str, float]]:
     headers = _header_map(sheet, header_row)
     # These columns are unchanged by insertions because they all sit at or before Z.
-    required = {"订单编号", "网店订单号", "应收合计", "货品编号", "数量", "金额"}
+    required = {
+        "订单编号",
+        "网店订单号",
+        "应收合计",
+        "货品编号",
+        "数量",
+        "单价",
+        "金额",
+        "备注",
+    }
     missing = required.difference(headers)
     if missing:
         raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
@@ -565,96 +665,137 @@ def _calculate_rows(
     total_col = headers["应收合计"]
     item_col = headers["货品编号"]
     quantity_col = headers["数量"]
+    unit_price_col = headers["单价"]
+    note_col = headers["备注"]
     original_amount_col = max(
         col
         for col in range(1, sheet.max_column + 1)
         if _text(sheet.cell(header_row, col).value) == "金额"
     )
 
-    groups: OrderedDict[str, list[int]] = OrderedDict()
+    groups: OrderedDict[tuple[str, str, int], list[int]] = OrderedDict()
     for row in range(header_row + 1, sheet.max_row + 1):
         if all(sheet.cell(row, col).value is None for col in range(1, 27)):
             continue
         order_number = _text(sheet.cell(row, order_col).value)
         web_order_number = _text(sheet.cell(row, web_order_col).value)
-        key = web_order_number or order_number or f"__ROW_{row}"
+        key = (
+            (web_order_number, order_number, 0)
+            if order_number or web_order_number
+            else ("", "", row)
+        )
         groups.setdefault(key, []).append(row)
 
     stats = SplitStats(orders=len(groups), rows=sum(len(rows) for rows in groups.values()))
-    total_orders = len(groups)
-    for order_index, (group_key, rows) in enumerate(groups.items(), start=1):
+    group_data: OrderedDict[tuple[str, str, int], dict[str, object]] = OrderedDict()
+    web_groups: OrderedDict[str, list[tuple[str, str, int]]] = OrderedDict()
+
+    for group_key, rows in groups.items():
         invalid_reason: str | None = None
-        display_order = group_key.replace("__ROW_", "第 ")
-
         original_amounts: dict[int, float] = {}
-        try:
-            for row in rows:
-                amount_value = sheet.cell(row, original_amount_col).value
-                original_amounts[row] = 0.0 if _text(amount_value) == "" else _number(amount_value, f"第 {row} 行原金额")
-        except ValueError as exc:
-            invalid_reason = str(exc)
-
-        if invalid_reason is not None:
-            stats.exceptional_orders += 1
-            stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
-            for row in rows:
-                _zero_targets(sheet, row)
-            if order_progress:
-                order_progress(order_index, total_orders)
-            continue
-
-        row_prices: dict[int, float] = {}
-        for row in rows:
-            item_code = _code(sheet.cell(row, item_col).value)
-            if item_code in prices and abs(original_amounts[row]) >= 1e-15:
-                row_prices[row] = prices[item_code]
-                stats.matched_rows += 1
-            else:
-                row_prices[row] = 0.0
-                stats.unmatched_rows += 1
-
-        total_price = sum(row_prices.values())
+        unit_prices: dict[int, float] = {}
         quantities: dict[int, float] = {}
         try:
             for row in rows:
-                if row_prices[row] != 0:
-                    quantities[row] = _number(sheet.cell(row, quantity_col).value, f"第 {row} 行数量")
-                    if quantities[row] == 0:
-                        invalid_reason = f"第 {row} 行匹配成功但数量为 0"
-                        break
+                amount_value = sheet.cell(row, original_amount_col).value
+                original_amounts[row] = (
+                    0.0
+                    if _text(amount_value) == ""
+                    else _number(amount_value, f"第 {row} 行原金额")
+                )
+                price_value = sheet.cell(row, unit_price_col).value
+                unit_prices[row] = (
+                    0.0
+                    if _text(price_value) == ""
+                    else _number(price_value, f"第 {row} 行原单价")
+                )
+                quantity_value = sheet.cell(row, quantity_col).value
+                quantities[row] = (
+                    0.0
+                    if _text(quantity_value) == ""
+                    else _number(quantity_value, f"第 {row} 行数量")
+                )
         except ValueError as exc:
             invalid_reason = str(exc)
 
-        if invalid_reason is not None:
-            stats.exceptional_orders += 1
-            stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
-            for row in rows:
-                _zero_targets(sheet, row)
-            if order_progress:
-                order_progress(order_index, total_orders)
-            continue
-
-        target_total = order_amounts.get(group_key, 0.0) if order_amounts else None
-        if target_total is None:
-            order_totals: list[float] = []
+        receivables: list[float] = []
+        if invalid_reason is None:
             try:
                 for row in rows:
-                    total_value = sheet.cell(row, total_col).value
-                    if _text(total_value) != "":
-                        order_totals.append(_number(total_value, f"第 {row} 行应收合计"))
+                    value = sheet.cell(row, total_col).value
+                    if _text(value) != "":
+                        receivables.append(_number(value, f"第 {row} 行应收合计"))
             except ValueError as exc:
                 invalid_reason = str(exc)
-
-            if not order_totals:
+        if invalid_reason is None:
+            if not receivables:
                 invalid_reason = (
                     "应收合计为空或公式没有缓存值，请先用 Excel/WPS 打开并保存源文件后再上传"
                 )
-            elif any(abs(value - order_totals[0]) > 1e-9 for value in order_totals[1:]):
-                invalid_reason = "同一网店订单存在多个不同的应收合计"
-            else:
-                target_total = order_totals[0] - sum(original_amounts.values()) * 0.01
+            elif any(abs(value - receivables[0]) > 1e-9 for value in receivables[1:]):
+                invalid_reason = "同一订单编号存在多个不同的应收合计"
 
-        if invalid_reason is not None:
+        web_orders = {
+            _text(sheet.cell(row, web_order_col).value)
+            for row in rows
+            if _text(sheet.cell(row, web_order_col).value)
+        }
+        if len(web_orders) > 1 and invalid_reason is None:
+            invalid_reason = "同一订单编号存在多个不同的网店订单号"
+        web_order = next(iter(web_orders), "")
+        group_data[group_key] = {
+            "rows": rows,
+            "web_order": web_order,
+            "original_amounts": original_amounts,
+            "unit_prices": unit_prices,
+            "quantities": quantities,
+            "receivable": receivables[0] if receivables else 0.0,
+            "invalid_reason": invalid_reason,
+        }
+        if web_order:
+            web_groups.setdefault(web_order, []).append(group_key)
+
+    group_targets: dict[tuple[str, str, int], float] = {}
+    for group_key, data in group_data.items():
+        if data["invalid_reason"] is None:
+            group_targets[group_key] = float(data["receivable"]) - sum(
+                data["original_amounts"].values()
+            ) * 0.01
+
+    for web_order, external_total in order_amounts.items():
+        valid_keys = [
+            key
+            for key in web_groups.get(web_order, [])
+            if group_data[key]["invalid_reason"] is None
+        ]
+        if not valid_keys:
+            continue
+        weights = [abs(float(group_data[key]["receivable"])) for key in valid_keys]
+        if sum(weights) < 1e-15:
+            weights = [
+                abs(sum(group_data[key]["original_amounts"].values()))
+                for key in valid_keys
+            ]
+        total_weight = sum(weights)
+        if total_weight < 1e-15:
+            continue
+        allocated = 0.0
+        for index, (key, weight) in enumerate(zip(valid_keys, weights)):
+            target = (
+                external_total - allocated
+                if index == len(valid_keys) - 1
+                else external_total * weight / total_weight
+            )
+            group_targets[key] = target
+            allocated += target
+
+    web_targets: OrderedDict[str, float] = OrderedDict()
+    total_orders = len(groups)
+    for order_index, (group_key, rows) in enumerate(groups.items(), start=1):
+        data = group_data[group_key]
+        invalid_reason = data["invalid_reason"]
+        display_order = group_key[1] or group_key[0] or f"第 {group_key[2]} 行"
+        if invalid_reason:
             stats.exceptional_orders += 1
             stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
             for row in rows:
@@ -663,79 +804,210 @@ def _calculate_rows(
                 order_progress(order_index, total_orders)
             continue
 
-        if abs(total_price) < 1e-15:
-            original_total = sum(original_amounts.values())
-            if abs(original_total) < 1e-15:
-                invalid_reason = "整单未匹配且原金额合计为 0，无法分摊订单金额"
+        original_amounts: dict[int, float] = data["original_amounts"]
+        unit_prices: dict[int, float] = data["unit_prices"]
+        quantities: dict[int, float] = data["quantities"]
+        target_total = group_targets[group_key]
+        web_order = str(data["web_order"])
+        if web_order:
+            web_targets[web_order] = web_targets.get(web_order, 0.0) + target_total
+
+        eligible_rows: list[int] = []
+        for row in rows:
+            if (
+                abs(original_amounts[row]) >= 1e-15
+                and abs(unit_prices[row]) >= 1e-15
+            ):
+                if quantities[row] == 0:
+                    invalid_reason = f"第 {row} 行单价和金额不为 0，但数量为 0"
+                    break
+                eligible_rows.append(row)
             else:
-                try:
-                    for row in rows:
-                        if abs(original_amounts[row]) < 1e-15:
-                            continue
-                        quantities[row] = _number(sheet.cell(row, quantity_col).value, f"第 {row} 行数量")
-                        if quantities[row] == 0:
-                            invalid_reason = f"第 {row} 行数量为 0"
-                            break
-                except ValueError as exc:
-                    invalid_reason = str(exc)
+                _zero_targets(sheet, row)
+                stats.unmatched_rows += 1
 
-            if invalid_reason is not None:
-                stats.exceptional_orders += 1
-                stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
-                for row in rows:
-                    _zero_targets(sheet, row)
-                if order_progress:
-                    order_progress(order_index, total_orders)
-                continue
-
-            eligible_rows = [row for row in rows if abs(original_amounts[row]) >= 1e-15]
-            allocated_total = 0.0
+        if invalid_reason:
+            stats.exceptional_orders += 1
+            stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
             for row in rows:
-                if row not in eligible_rows:
-                    _zero_targets(sheet, row)
-                    continue
-                ad = (
-                    target_total - allocated_total
-                    if row == eligible_rows[-1]
-                    else target_total * original_amounts[row] / original_total
-                )
-                allocated_total += ad
-                ac = ad / quantities[row]
-                sheet.cell(row, 27, 0.0)
-                sheet.cell(row, 28, 0.0)
-                sheet.cell(row, 29, ac)
-                sheet.cell(row, 30, ad)
-                sheet.cell(row, 36, ad)
+                _zero_targets(sheet, row)
             if order_progress:
                 order_progress(order_index, total_orders)
             continue
 
-        matched_rows = [row for row in rows if row_prices[row] != 0]
-        allocated_total = 0.0
-        for row in rows:
-            aa = row_prices[row]
-            if aa == 0:
+        if not eligible_rows:
+            original_total = sum(original_amounts.values())
+            if abs(original_total) < 1e-15:
+                invalid_reason = "整单单价或原金额合计为 0，无法分摊订单金额"
+            else:
+                invalid_reason = "非零金额行的单价均为 0，无法按比例拆分"
+        if invalid_reason:
+            stats.exceptional_orders += 1
+            stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
+            for row in rows:
                 _zero_targets(sheet, row)
-                continue
-            quantity = quantities[row]
-            ab = aa / total_price / quantity
-            ad = (
-                target_total - allocated_total
-                if row == matched_rows[-1]
-                else target_total * aa / total_price
-            )
-            allocated_total += ad
-            ac = ad / quantity
-            sheet.cell(row, 27, aa)
-            sheet.cell(row, 28, ab)
-            sheet.cell(row, 29, ac)
-            sheet.cell(row, 30, ad)
-            sheet.cell(row, 36, ad)
+            if order_progress:
+                order_progress(order_index, total_orders)
+            continue
+
+        if not ratio_data.has_parent_ratios:
+            row_weights: dict[int, float] = {}
+            for row in eligible_rows:
+                item_code = _code(sheet.cell(row, item_col).value)
+                price = ratio_data.prices.get(item_code, 0.0)
+                if price:
+                    row_weights[row] = price
+                    stats.matched_rows += 1
+                else:
+                    stats.unmatched_rows += 1
+            if not row_weights:
+                row_weights = {row: original_amounts[row] for row in eligible_rows}
+            weight_total = sum(row_weights.values())
+            allocated = 0.0
+            weighted_rows = list(row_weights)
+            for row in eligible_rows:
+                if row not in row_weights:
+                    _zero_targets(sheet, row)
+                    continue
+                ad = (
+                    target_total - allocated
+                    if row == weighted_rows[-1]
+                    else target_total * row_weights[row] / weight_total
+                )
+                allocated += ad
+                quantity = quantities[row]
+                aa = ratio_data.prices.get(
+                    _code(sheet.cell(row, item_col).value), 0.0
+                )
+                sheet.cell(row, 27, aa)
+                sheet.cell(row, 28, ad / target_total / quantity if target_total else 0.0)
+                sheet.cell(row, 29, ad / quantity)
+                sheet.cell(row, 30, ad)
+                sheet.cell(row, 36, ad)
+        else:
+            allocation_groups: OrderedDict[str, list[int]] = OrderedDict()
+            parents: dict[int, str] = {}
+            for row in eligible_rows:
+                parent = _mother_code(sheet.cell(row, note_col).value)
+                parents[row] = parent
+                key = f"PARENT:{parent}" if parent else f"ROW:{row}"
+                allocation_groups.setdefault(key, []).append(row)
+
+            group_weights = {
+                key: sum(original_amounts[row] for row in group_rows)
+                for key, group_rows in allocation_groups.items()
+            }
+            group_weight_total = sum(group_weights.values())
+            if abs(group_weight_total) < 1e-15:
+                group_weights = {
+                    key: sum(
+                        abs(unit_prices[row] * quantities[row])
+                        for row in group_rows
+                    )
+                    for key, group_rows in allocation_groups.items()
+                }
+                group_weight_total = sum(group_weights.values())
+
+            order_allocated = 0.0
+            group_items = list(allocation_groups.items())
+            for group_index, (key, group_rows) in enumerate(group_items):
+                group_target = (
+                    target_total - order_allocated
+                    if group_index == len(group_items) - 1
+                    else target_total * group_weights[key] / group_weight_total
+                )
+                order_allocated += group_target
+                parent = parents[group_rows[0]]
+                entries = {
+                    row: ratio_data.pairs.get(
+                        (parent, _code(sheet.cell(row, item_col).value))
+                    )
+                    for row in group_rows
+                }
+                use_ratio = bool(parent) and all(
+                    entry is not None
+                    and abs(entry.price) >= 1e-15
+                    and abs(entry.ratio) >= 1e-15
+                    for entry in entries.values()
+                )
+
+                row_weights: dict[int, float] = {}
+                if use_ratio:
+                    child_rows: OrderedDict[str, list[int]] = OrderedDict()
+                    for row in group_rows:
+                        child_rows.setdefault(
+                            _code(sheet.cell(row, item_col).value), []
+                        ).append(row)
+                    for child, duplicate_rows in child_rows.items():
+                        entry = ratio_data.pairs[(parent, child)]
+                        duplicate_weights = {
+                            row: abs(unit_prices[row] * quantities[row])
+                            for row in duplicate_rows
+                        }
+                        duplicate_total = sum(duplicate_weights.values())
+                        if duplicate_total < 1e-15:
+                            duplicate_weights = {row: 1.0 for row in duplicate_rows}
+                            duplicate_total = float(len(duplicate_rows))
+                        for row in duplicate_rows:
+                            row_weights[row] = (
+                                entry.ratio
+                                * duplicate_weights[row]
+                                / duplicate_total
+                            )
+                    if abs(sum(row_weights.values())) < 1e-15:
+                        use_ratio = False
+
+                if use_ratio:
+                    stats.matched_rows += len(group_rows)
+                else:
+                    row_weights = {
+                        row: abs(unit_prices[row] * quantities[row])
+                        for row in group_rows
+                    }
+                    if abs(sum(row_weights.values())) < 1e-15:
+                        row_weights = {
+                            row: abs(original_amounts[row]) for row in group_rows
+                    }
+                    for row in group_rows:
+                        entry = entries[row]
+                        if (
+                            entry is None
+                            or abs(entry.price) < 1e-15
+                            or abs(entry.ratio) < 1e-15
+                        ):
+                            stats.unmatched_rows += 1
+                        else:
+                            stats.matched_rows += 1
+
+                row_weight_total = sum(row_weights.values())
+                group_allocated = 0.0
+                for row_index, row in enumerate(group_rows):
+                    ad = (
+                        group_target - group_allocated
+                        if row_index == len(group_rows) - 1
+                        else group_target * row_weights[row] / row_weight_total
+                    )
+                    group_allocated += ad
+                    quantity = quantities[row]
+                    aa = (
+                        entries[row].price
+                        if use_ratio and entries[row] is not None
+                        else unit_prices[row]
+                    )
+                    sheet.cell(row, 27, aa)
+                    sheet.cell(
+                        row,
+                        28,
+                        ad / target_total / quantity if target_total else 0.0,
+                    )
+                    sheet.cell(row, 29, ad / quantity)
+                    sheet.cell(row, 30, ad)
+                    sheet.cell(row, 36, ad)
 
         if order_progress:
             order_progress(order_index, total_orders)
 
-    return stats
+    return stats, web_targets
 
 
 def process_workbooks(
@@ -763,8 +1035,8 @@ def process_workbooks(
         raise SplitterError("输出文件不能覆盖上传的源文件。")
 
     report(10, "读取组合装拆分占比表")
-    prices, _ = _load_ratio_prices(ratio_path)
-    report(30, f"已载入 {len(prices)} 个首匹配单品")
+    ratio_data = _load_ratio_data(ratio_path)
+    report(30, f"已载入 {len(ratio_data.prices)} 个子件")
 
     try:
         workbook = load_workbook(sales_path, data_only=False, keep_links=False)
@@ -783,10 +1055,10 @@ def process_workbooks(
         result_sheet = _prepare_result_sheet(workbook, source_sheet, header_row)
         order_amounts = _load_cached_order_amounts(cached_workbook)
         report(60, "按订单计算拆分单价")
-        stats = _calculate_rows(
+        stats, web_targets = _calculate_rows(
             result_sheet,
             header_row,
-            prices,
+            ratio_data,
             order_amounts,
             order_progress=lambda done, total: report(
                 60 + int((done / total) * 28) if total else 88,
@@ -794,7 +1066,7 @@ def process_workbooks(
             ),
         )
         _write_result_formulas(result_sheet, header_row)
-        _prepare_summary_sheet(workbook, result_sheet, header_row, order_amounts)
+        _prepare_summary_sheet(workbook, result_sheet, header_row, web_targets)
         _enable_formula_recalculation(workbook)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
