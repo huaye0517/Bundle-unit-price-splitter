@@ -27,7 +27,7 @@ def main() -> int:
             print(f"source_rows={stats.source_rows}")
             return 0
 
-        if len(sys.argv) not in (4, 5):
+        if len(sys.argv) != 4:
             print("status=error")
             print("message_b64=" + encoded("内部调用参数不完整。"))
             return 2
@@ -35,13 +35,7 @@ def main() -> int:
         def progress(percent: int, message: str) -> None:
             print(f"progress={percent}|{encoded(message)}", flush=True)
 
-        stats = process_workbooks(
-            sys.argv[1],
-            sys.argv[2],
-            sys.argv[3],
-            progress=progress,
-            reference_path=sys.argv[4] if len(sys.argv) == 5 else None,
-        )
+        stats = process_workbooks(sys.argv[1], sys.argv[2], sys.argv[3], progress=progress)
         print("status=ok")
         print(f"orders={stats.orders}")
         print(f"rows={stats.rows}")

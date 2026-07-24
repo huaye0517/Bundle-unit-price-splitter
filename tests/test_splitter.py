@@ -8,7 +8,6 @@ from openpyxl import Workbook, load_workbook
 
 from splitter import (
     SplitterError,
-    _enable_formula_recalculation,
     _freeze_cached_amounts,
     process_workbooks,
     ratio_file_info,
@@ -85,29 +84,7 @@ def add_order_amounts(path: Path, amounts: list[tuple[str, float]]) -> None:
     wb.close()
 
 
-def make_reference(path: Path, rows: list[tuple[str, object, object]]) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "采购商品列表"
-    ws.append(["序号", "订单号"] + [""] * 12 + ["服务费", "补偿"])
-    for index, (order, service, compensation) in enumerate(rows, start=1):
-        ws.append([index, order] + [""] * 12 + [service, compensation])
-    wb.save(path)
-    wb.close()
-
-
 class SplitterTests(unittest.TestCase):
-    def test_missing_calculation_properties_are_initialized(self):
-        workbook = Workbook()
-        workbook.calculation = None
-
-        _enable_formula_recalculation(workbook)
-
-        self.assertEqual(workbook.calculation.calcMode, "auto")
-        self.assertTrue(workbook.calculation.fullCalcOnLoad)
-        self.assertTrue(workbook.calculation.forceFullCalc)
-        workbook.close()
-
     def test_cached_receivable_formulas_are_frozen_as_values(self):
         formula_book = Workbook()
         formula_sheet = formula_book.active
@@ -161,35 +138,30 @@ class SplitterTests(unittest.TestCase):
             result = result_book["拆分结果"]
             self.assertEqual([result.cell(row, 14).value for row in range(2, 12)], [187.5] * 10)
             net_total = 187.5 - 187.5 * 0.01
-            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 12)), net_total, places=8)
-            self.assertAlmostEqual(sum(result.cell(row, 38).value for row in range(2, 12)), net_total, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 12)), net_total, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 12)), net_total, places=8)
             for row in range(2, 12):
-                self.assertAlmostEqual(result.cell(row, 34).value, result.cell(row, 38).value, places=8)
-                self.assertEqual(result.cell(row, 15).value, 0)
-                self.assertEqual(result.cell(row, 16).value, f"=N{row}*1%")
-                self.assertEqual(result.cell(row, 17).value, 0)
-                self.assertEqual(result.cell(row, 18).value, f"=N{row}-O{row}-P{row}-Q{row}")
-            self.assertEqual(result["O1"].value, "服务费")
-            self.assertEqual(result["P1"].value, "手续费")
-            self.assertEqual(result["Q1"].value, "赔偿")
-            self.assertEqual(result["R1"].value, "需拆金额")
-            self.assertEqual(result["AH1"].value, "金额")
-            self.assertEqual(result["AL1"].value, "摊后金额")
-            self.assertEqual(result["AQ1"].value, "赠品")
-            self.assertEqual(result.auto_filter.ref, "A1:AQ11")
+                self.assertAlmostEqual(result.cell(row, 30).value, result.cell(row, 36).value, places=8)
+                self.assertEqual(result.cell(row, 34).value, f"=AG{row}*1%")
+                self.assertEqual(result.cell(row, 35).value, f"=N{row}-AH{row}")
+            self.assertEqual(result["AH1"].value, "手续费1%")
+            self.assertEqual(result["AI1"].value, "最终金额")
+            self.assertEqual(result["AJ1"].value, "摊后金额")
+            self.assertEqual(result["AO1"].value, "赠品")
+            self.assertEqual(result.auto_filter.ref, "A1:AO11")
             summary = result_book["透视表"]
             self.assertEqual(
                 [summary.cell(1, col).value for col in range(1, 5)],
-                ["网店订单号", "平均值项:需拆金额", "求和项:金额", "差异"],
+                ["网店订单号", "平均值项:应收合计", "求和项:金额", "差异"],
             )
             self.assertEqual(summary["A2"].value, "PO-260629-323800286823316")
             self.assertEqual(summary["B2"].value, net_total)
             self.assertAlmostEqual(summary["C2"].value, net_total, places=8)
-            self.assertEqual(summary["D2"].value, "=B2-C2")
+            self.assertEqual(summary["D2"].value, "=C2-B2")
             self.assertEqual(summary["A3"].value, "总计")
             self.assertEqual(summary["B3"].value, "=SUM(B2:B2)")
             self.assertEqual(summary["C3"].value, "=SUM(C2:C2)")
-            self.assertEqual(summary["D3"].value, "=B3-C3")
+            self.assertEqual(summary["D3"].value, "=C3-B3")
             self.assertEqual(len(getattr(summary, "_pivots", [])), 0)
             self.assertEqual(result_book.calculation.calcMode, "auto")
             self.assertTrue(result_book.calculation.fullCalcOnLoad)
@@ -227,95 +199,13 @@ class SplitterTests(unittest.TestCase):
 
             result = load_workbook(output, data_only=False)
             summary = result["透视表"]
-            self.assertEqual(summary["B2"].value, 23.76)
-            self.assertAlmostEqual(summary["C2"].value, 23.76, places=8)
-            self.assertAlmostEqual(summary["B3"].value, 72.765, places=8)
-            self.assertAlmostEqual(summary["C3"].value, 72.765, places=8)
-            self.assertEqual(summary["D2"].value, "=B2-C2")
-            self.assertEqual(summary["D3"].value, "=B3-C3")
+            self.assertEqual(summary["B2"].value, 23.705)
+            self.assertAlmostEqual(summary["C2"].value, 23.705, places=8)
+            self.assertAlmostEqual(summary["B3"].value, 72.6387, places=8)
+            self.assertAlmostEqual(summary["C3"].value, 72.6387, places=8)
+            self.assertEqual(summary["D2"].value, "=C2-B2")
+            self.assertEqual(summary["D3"].value, "=C3-B3")
             result.close()
-
-    def test_reference_bill_is_aggregated_once_and_r_drives_allocation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            ratio = root / "ratio.xlsx"
-            sales = root / "sales.xlsx"
-            reference = root / "reference.xlsx"
-            output = root / "output.xlsx"
-            make_ratio(ratio)
-
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "销售明细"
-            ws.append(SALES_HEADERS)
-            for code, amount in (("SKU1", 20), ("SKU2", 35.2)):
-                row = [""] * len(SALES_HEADERS)
-                row[1] = "ORDER-COMP"
-                row[10] = "260619-185440693790453"
-                row[13] = 55.2
-                row[21] = code
-                row[24] = 1
-                row[25] = amount
-                row[28] = amount
-                ws.append(row)
-            wb.save(sales)
-            wb.close()
-            make_reference(
-                reference,
-                [
-                    ("260619-185440693790453", 4, 5.3),
-                    ("260619-185440693790453", 6.2, None),
-                    ("NOT-IN-SALES", 99, 99),
-                ],
-            )
-
-            process_workbooks(ratio, sales, output, reference_path=reference)
-
-            book = load_workbook(output, data_only=False)
-            result = book["拆分结果"]
-            for row in (2, 3):
-                self.assertEqual(result.cell(row, 15).value, 10.2)
-                self.assertEqual(result.cell(row, 16).value, f"=N{row}*1%")
-                self.assertEqual(result.cell(row, 17).value, 5.3)
-                self.assertEqual(result.cell(row, 18).value, f"=N{row}-O{row}-P{row}-Q{row}")
-            self.assertAlmostEqual(
-                sum(result.cell(row, 34).value for row in (2, 3)), 39.148, places=12
-            )
-            self.assertAlmostEqual(
-                sum(result.cell(row, 38).value for row in (2, 3)), 39.148, places=12
-            )
-            summary = book["透视表"]
-            self.assertAlmostEqual(summary["B2"].value, 39.148, places=12)
-            self.assertAlmostEqual(summary["C2"].value, 39.148, places=12)
-            self.assertEqual(summary["D2"].value, "=B2-C2")
-            book.close()
-
-    def test_reference_bill_requires_formula_cache_and_expected_headers(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            ratio, sales = root / "ratio.xlsx", root / "sales.xlsx"
-            make_ratio(ratio)
-            make_sales(sales)
-
-            missing = root / "missing.xlsx"
-            wb = Workbook()
-            ws = wb.active
-            ws.append(["订单号", "服务费"])
-            ws.append(["WEB-1", 1])
-            wb.save(missing)
-            wb.close()
-            with self.assertRaisesRegex(SplitterError, "订单号、服务费、补偿/赔偿"):
-                process_workbooks(ratio, sales, root / "missing-output.xlsx", reference_path=missing)
-
-            uncached = root / "uncached.xlsx"
-            wb = Workbook()
-            ws = wb.active
-            ws.append(["订单号", "服务费", "赔偿"])
-            ws.append(["WEB-1", "=1+2", 0])
-            wb.save(uncached)
-            wb.close()
-            with self.assertRaisesRegex(SplitterError, "公式没有缓存值"):
-                process_workbooks(ratio, sales, root / "uncached-output.xlsx", reference_path=uncached)
 
     def test_conflicting_receivable_totals_mark_only_that_order_exceptional(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -337,8 +227,8 @@ class SplitterTests(unittest.TestCase):
             self.assertTrue(any("多个不同的应收合计" in warning for warning in stats.warnings))
             result = load_workbook(output, data_only=True)["拆分结果"]
             for row in range(2, 5):
-                self.assertEqual(result.cell(row, 34).value, 0)
-                self.assertEqual(result.cell(row, 38).value, 0)
+                self.assertEqual(result.cell(row, 30).value, 0)
+                self.assertEqual(result.cell(row, 36).value, 0)
 
     def test_blank_web_order_falls_back_to_internal_order_number(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -359,8 +249,8 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(stats.orders, 1)
             self.assertEqual(stats.exceptional_orders, 0)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 185.625, places=8)
-            self.assertAlmostEqual(sum(result.cell(row, 38).value for row in range(2, 5)), 185.625, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 187.1, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 187.1, places=8)
 
     def test_append_ratio_data_adds_new_bundle_items_without_overwriting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -419,9 +309,9 @@ class SplitterTests(unittest.TestCase):
 
             self.assertEqual(stats.matched_rows, 2)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertEqual(result["AE3"].value, 40)
-            self.assertEqual(result["AE4"].value, 60)
-            self.assertAlmostEqual(result["AL3"].value + result["AL4"].value, 198, places=12)
+            self.assertEqual(result["AA3"].value, 40)
+            self.assertEqual(result["AA4"].value, 60)
+            self.assertAlmostEqual(result["AJ3"].value + result["AJ4"].value, 199.6, places=12)
 
     def test_formula_chain_and_first_match(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -439,20 +329,20 @@ class SplitterTests(unittest.TestCase):
             self.assertTrue(any("正在拆分订单 1/1" in message for _, message in progress_events))
             wb = load_workbook(output, data_only=True)
             ws = wb["拆分结果"]
-            self.assertEqual(ws["AE2"].value, 0)
-            self.assertEqual(ws["AH2"].value, 0)
-            self.assertEqual(ws["AE3"].value, 40)  # first SKU1, not 100
-            self.assertEqual(ws["AE3"].number_format, "0.00")
-            self.assertEqual(ws["AF3"].number_format, "0.00")
-            self.assertEqual(ws["AL3"].number_format, "0.00")
-            self.assertAlmostEqual(ws["AF3"].value, 40 / 100 / 1, places=14)
-            self.assertAlmostEqual(ws["AG3"].value, 79.2, places=12)
-            self.assertAlmostEqual(ws["AH3"].value, 79.2, places=12)
-            self.assertAlmostEqual(ws["AE4"].value, 60, places=12)
-            self.assertAlmostEqual(ws["AG4"].value, 59.4, places=12)
-            self.assertAlmostEqual(ws["AH4"].value, 118.8, places=12)
-            self.assertAlmostEqual(ws["AH3"].value + ws["AH4"].value, 198, places=12)
-            self.assertAlmostEqual(ws["AL3"].value + ws["AL4"].value, 198, places=12)
+            self.assertEqual(ws["AA2"].value, 0)
+            self.assertEqual(ws["AD2"].value, 0)
+            self.assertEqual(ws["AA3"].value, 40)  # first SKU1, not 100
+            self.assertEqual(ws["AA3"].number_format, "0.00")
+            self.assertEqual(ws["AB3"].number_format, "0.00")
+            self.assertEqual(ws["AJ3"].number_format, "0.00")
+            self.assertAlmostEqual(ws["AB3"].value, 40 / 100 / 1, places=14)
+            self.assertAlmostEqual(ws["AC3"].value, 79.84, places=12)
+            self.assertAlmostEqual(ws["AD3"].value, 79.84, places=12)
+            self.assertAlmostEqual(ws["AA4"].value, 60, places=12)
+            self.assertAlmostEqual(ws["AC4"].value, 59.88, places=12)
+            self.assertAlmostEqual(ws["AD4"].value, 119.76, places=12)
+            self.assertAlmostEqual(ws["AD3"].value + ws["AD4"].value, 199.6, places=12)
+            self.assertAlmostEqual(ws["AJ3"].value + ws["AJ4"].value, 199.6, places=12)
             self.assertIn("销售明细", wb.sheetnames)
             self.assertIn("其他工作表", wb.sheetnames)
             self.assertEqual(wb["其他工作表"]["A1"].value, "保留")
@@ -475,15 +365,15 @@ class SplitterTests(unittest.TestCase):
             self.assertFalse(stats.warnings)
             result = load_workbook(output, data_only=True)["拆分结果"]
             for row in range(2, 5):
-                self.assertEqual(result.cell(row, 31).value, 0)
-                self.assertEqual(result.cell(row, 33).value, 49.5)
-            self.assertEqual(result.cell(2, 34).value, 49.5)
-            self.assertEqual(result.cell(3, 34).value, 49.5)
-            self.assertEqual(result.cell(4, 34).value, 99)
-            self.assertEqual(result.cell(2, 38).value, 49.5)
-            self.assertEqual(result.cell(3, 38).value, 49.5)
-            self.assertEqual(result.cell(4, 38).value, 99)
-            self.assertEqual(sum(result.cell(row, 38).value for row in range(2, 5)), 198)
+                self.assertEqual(result.cell(row, 27).value, 0)
+                self.assertEqual(result.cell(row, 29).value, 49.9)
+            self.assertEqual(result.cell(2, 30).value, 49.9)
+            self.assertEqual(result.cell(3, 30).value, 49.9)
+            self.assertEqual(result.cell(4, 30).value, 99.8)
+            self.assertEqual(result.cell(2, 36).value, 49.9)
+            self.assertEqual(result.cell(3, 36).value, 49.9)
+            self.assertEqual(result.cell(4, 36).value, 99.8)
+            self.assertEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 199.6)
 
     def test_internal_orders_are_balanced_independently(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -506,10 +396,10 @@ class SplitterTests(unittest.TestCase):
             stats = process_workbooks(ratio, sales, output)
             self.assertEqual(stats.orders, 2)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(result["AH2"].value + result["AH3"].value, 49.5, places=12)
-            self.assertAlmostEqual(result["AH4"].value, 79.2, places=12)
-            self.assertAlmostEqual(result["AL2"].value + result["AL3"].value, 49.5, places=12)
-            self.assertAlmostEqual(result["AL4"].value, 79.2, places=12)
+            self.assertAlmostEqual(result["AD2"].value + result["AD3"].value, 49.8, places=12)
+            self.assertAlmostEqual(result["AD4"].value, 79.8, places=12)
+            self.assertAlmostEqual(result["AJ2"].value + result["AJ3"].value, 49.8, places=12)
+            self.assertAlmostEqual(result["AJ4"].value, 79.8, places=12)
 
     def test_sheet1_order_amounts_are_allocated_by_web_order(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -534,10 +424,8 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(stats.orders, 2)
             self.assertEqual(stats.exceptional_orders, 0)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 128.7, places=12)
-            self.assertAlmostEqual(sum(result.cell(row, 38).value for row in range(2, 5)), 128.7, places=12)
-            self.assertEqual([result.cell(row, 14).value for row in (2, 3)], [50, 50])
-            self.assertEqual(result.cell(4, 14).value, 80)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 130, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 130, places=12)
 
     def test_zero_original_amount_does_not_participate_in_allocation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -554,11 +442,11 @@ class SplitterTests(unittest.TestCase):
             process_workbooks(ratio, sales, output)
 
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertEqual(result["AE3"].value, 0)
-            self.assertEqual(result["AH3"].value, 0)
-            self.assertEqual(result["AL3"].value, 0)
-            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 198, places=12)
-            self.assertAlmostEqual(sum(result.cell(row, 38).value for row in range(2, 5)), 198, places=12)
+            self.assertEqual(result["AA3"].value, 0)
+            self.assertEqual(result["AD3"].value, 0)
+            self.assertEqual(result["AJ3"].value, 0)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 199.7, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 199.7, places=12)
 
     def test_sheet1_web_order_amount_overrides_repeated_source_totals(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -584,9 +472,8 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(stats.orders, 1)
             self.assertEqual(stats.exceptional_orders, 0)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(sum(result.cell(row, 34).value for row in range(2, 5)), 128.7, places=12)
-            self.assertAlmostEqual(sum(result.cell(row, 38).value for row in range(2, 5)), 128.7, places=12)
-            self.assertEqual([result.cell(row, 14).value for row in range(2, 5)], [130, 130, 130])
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 130, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 130, places=12)
 
     def test_uses_sales_sheet_with_most_rows(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -615,7 +502,7 @@ class SplitterTests(unittest.TestCase):
             result = load_workbook(output, data_only=True)["拆分结果"]
             self.assertEqual(result.max_row, 5)
             self.assertEqual(result["K5"].value, "WEB-2")
-            self.assertAlmostEqual(result["AH5"].value, 29.7, places=12)
+            self.assertAlmostEqual(result["AD5"].value, 29.7, places=12)
 
     def test_source_files_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
