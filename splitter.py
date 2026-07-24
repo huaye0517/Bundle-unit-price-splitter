@@ -11,6 +11,7 @@ from typing import Callable, Iterable
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -538,6 +539,8 @@ def _prepare_summary_sheet(workbook, result_sheet, header_row: int, order_amount
 
 
 def _enable_formula_recalculation(workbook) -> None:
+    if workbook.calculation is None:
+        workbook.calculation = CalcProperties()
     workbook.calculation.calcMode = "auto"
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True

@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 
 from splitter import (
     SplitterError,
+    _enable_formula_recalculation,
     _freeze_cached_amounts,
     process_workbooks,
     ratio_file_info,
@@ -85,6 +86,17 @@ def add_order_amounts(path: Path, amounts: list[tuple[str, float]]) -> None:
 
 
 class SplitterTests(unittest.TestCase):
+    def test_missing_calculation_properties_are_initialized(self):
+        workbook = Workbook()
+        workbook.calculation = None
+
+        _enable_formula_recalculation(workbook)
+
+        self.assertEqual(workbook.calculation.calcMode, "auto")
+        self.assertTrue(workbook.calculation.fullCalcOnLoad)
+        self.assertTrue(workbook.calculation.forceFullCalc)
+        workbook.close()
+
     def test_cached_receivable_formulas_are_frozen_as_values(self):
         formula_book = Workbook()
         formula_sheet = formula_book.active
