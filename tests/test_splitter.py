@@ -149,7 +149,7 @@ class SplitterTests(unittest.TestCase):
             result_book = load_workbook(output, data_only=False)
             result = result_book["拆分结果"]
             self.assertEqual([result.cell(row, 14).value for row in range(2, 12)], [187.5] * 10)
-            net_total = 10 * (187.5 - 18.75 * 0.01)
+            net_total = 10 * (187.5 - 187.5 * 0.01)
             self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 12)), net_total, places=8)
             self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 12)), net_total, places=8)
             for row in range(2, 12):
@@ -211,10 +211,10 @@ class SplitterTests(unittest.TestCase):
 
             result = load_workbook(output, data_only=False)
             summary = result["透视表"]
-            self.assertEqual(summary["B2"].value, 23.705)
-            self.assertAlmostEqual(summary["C2"].value, 23.705, places=8)
-            self.assertAlmostEqual(summary["B3"].value, 72.6387, places=8)
-            self.assertAlmostEqual(summary["C3"].value, 72.6387, places=8)
+            self.assertEqual(summary["B2"].value, 23.76)
+            self.assertAlmostEqual(summary["C2"].value, 23.76, places=8)
+            self.assertAlmostEqual(summary["B3"].value, 72.765, places=8)
+            self.assertAlmostEqual(summary["C3"].value, 72.765, places=8)
             self.assertEqual(summary["D2"].value, "=C2-B2")
             self.assertEqual(summary["D3"].value, "=C3-B3")
             result.close()
@@ -261,8 +261,8 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(stats.orders, 1)
             self.assertEqual(stats.exceptional_orders, 0)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 187.1, places=8)
-            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 187.1, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 185.625, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 185.625, places=8)
 
     def test_append_ratio_data_adds_new_bundle_items_without_overwriting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -331,7 +331,7 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(result["AA4"].value, 60)
             self.assertAlmostEqual(
                 sum(result.cell(row, 36).value for row in range(2, 5)),
-                199.6,
+                198.0,
                 places=12,
             )
 
@@ -358,13 +358,13 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(ws["AB3"].number_format, "0.00")
             self.assertEqual(ws["AJ3"].number_format, "0.00")
             self.assertAlmostEqual(ws["AB3"].value, 40 / 100 / 1, places=14)
-            self.assertAlmostEqual(ws["AC3"].value, 79.84, places=12)
-            self.assertAlmostEqual(ws["AD3"].value, 79.84, places=12)
+            self.assertAlmostEqual(ws["AC3"].value, 79.2, places=12)
+            self.assertAlmostEqual(ws["AD3"].value, 79.2, places=12)
             self.assertAlmostEqual(ws["AA4"].value, 60, places=12)
-            self.assertAlmostEqual(ws["AC4"].value, 59.88, places=12)
-            self.assertAlmostEqual(ws["AD4"].value, 119.76, places=12)
-            self.assertAlmostEqual(ws["AD3"].value + ws["AD4"].value, 199.6, places=12)
-            self.assertAlmostEqual(ws["AJ3"].value + ws["AJ4"].value, 199.6, places=12)
+            self.assertAlmostEqual(ws["AC4"].value, 59.4, places=12)
+            self.assertAlmostEqual(ws["AD4"].value, 118.8, places=12)
+            self.assertAlmostEqual(ws["AD3"].value + ws["AD4"].value, 198.0, places=12)
+            self.assertAlmostEqual(ws["AJ3"].value + ws["AJ4"].value, 198.0, places=12)
             self.assertIn("销售明细", wb.sheetnames)
             self.assertIn("其他工作表", wb.sheetnames)
             self.assertEqual(wb["其他工作表"]["A1"].value, "保留")
@@ -388,14 +388,14 @@ class SplitterTests(unittest.TestCase):
             result = load_workbook(output, data_only=True)["拆分结果"]
             for row in range(2, 5):
                 self.assertEqual(result.cell(row, 27).value, 0)
-                self.assertEqual(result.cell(row, 29).value, 49.9)
-            self.assertEqual(result.cell(2, 30).value, 49.9)
-            self.assertEqual(result.cell(3, 30).value, 49.9)
-            self.assertEqual(result.cell(4, 30).value, 99.8)
-            self.assertEqual(result.cell(2, 36).value, 49.9)
-            self.assertEqual(result.cell(3, 36).value, 49.9)
-            self.assertEqual(result.cell(4, 36).value, 99.8)
-            self.assertEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 199.6)
+                self.assertEqual(result.cell(row, 29).value, 49.5)
+            self.assertEqual(result.cell(2, 30).value, 49.5)
+            self.assertEqual(result.cell(3, 30).value, 49.5)
+            self.assertEqual(result.cell(4, 30).value, 99)
+            self.assertEqual(result.cell(2, 36).value, 49.5)
+            self.assertEqual(result.cell(3, 36).value, 49.5)
+            self.assertEqual(result.cell(4, 36).value, 99)
+            self.assertEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 198)
 
     def test_internal_orders_are_balanced_independently(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -418,10 +418,10 @@ class SplitterTests(unittest.TestCase):
             stats = process_workbooks(ratio, sales, output)
             self.assertEqual(stats.orders, 2)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(result["AD2"].value + result["AD3"].value, 49.8, places=12)
-            self.assertAlmostEqual(result["AD4"].value, 79.8, places=12)
-            self.assertAlmostEqual(result["AJ2"].value + result["AJ3"].value, 49.8, places=12)
-            self.assertAlmostEqual(result["AJ4"].value, 79.8, places=12)
+            self.assertAlmostEqual(result["AD2"].value + result["AD3"].value, 49.5, places=12)
+            self.assertAlmostEqual(result["AD4"].value, 79.2, places=12)
+            self.assertAlmostEqual(result["AJ2"].value + result["AJ3"].value, 49.5, places=12)
+            self.assertAlmostEqual(result["AJ4"].value, 79.2, places=12)
 
     def test_sheet1_order_amounts_are_allocated_by_web_order(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -467,8 +467,8 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(result["AA3"].value, 0)
             self.assertEqual(result["AD3"].value, 0)
             self.assertEqual(result["AJ3"].value, 0)
-            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 199.7, places=12)
-            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 199.7, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 198, places=12)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 198, places=12)
 
     def test_sheet1_web_order_amount_overrides_repeated_source_totals(self):
         with tempfile.TemporaryDirectory() as directory:

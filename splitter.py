@@ -763,9 +763,8 @@ def _calculate_rows(
     group_targets: dict[tuple[str, str, int], float] = {}
     for group_key, data in group_data.items():
         if data["invalid_reason"] is None:
-            group_targets[group_key] = float(data["receivable"]) - sum(
-                data["original_amounts"].values()
-            ) * 0.01
+            receivable = float(data["receivable"])
+            group_targets[group_key] = receivable - receivable * 0.01
 
     external_group_targets: dict[tuple[str, str, int], float] = {}
     externally_covered_orders: dict[tuple[str, str, int], set[str]] = {}
