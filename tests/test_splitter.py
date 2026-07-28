@@ -142,7 +142,7 @@ class SplitterTests(unittest.TestCase):
                     result.cell(row, 37).value,
                 )
             summary = result_book["透视表"]
-            self.assertEqual(summary["B2"].value, 100)
+            self.assertEqual(summary["B2"].value, 99.01)
             self.assertEqual(summary["C2"].value, 99.98)
             self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
             result_book.close()
@@ -230,12 +230,16 @@ class SplitterTests(unittest.TestCase):
             summary = result_book["透视表"]
             self.assertEqual(
                 [summary.cell(1, col).value for col in range(1, 5)],
-                ["网店订单号", "平均值项:最终金额", "求和项:摊后金额", "差异"],
+                ["网店订单号", "平均值项:应收合计-1%", "求和项:摊后金额", "差异"],
             )
             self.assertEqual(summary["A2"].value, "PO-260629-323800286823316")
-            self.assertEqual(summary["B2"].value, 187.31)
+            self.assertEqual(summary["B2"].value, 185.63)
             self.assertAlmostEqual(summary["C2"].value, net_total, places=8)
             self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
+            self.assertEqual(
+                summary["D2"].number_format,
+                "0.00_);[Red]\\(0.00\\)",
+            )
             self.assertEqual(summary["A3"].value, "总计")
             self.assertEqual(summary["B3"].value, "=ROUND(SUM(B2:B2),2)")
             self.assertEqual(summary["C3"].value, "=ROUND(SUM(C2:C2),2)")
@@ -284,9 +288,9 @@ class SplitterTests(unittest.TestCase):
 
             result = load_workbook(output, data_only=False)
             summary = result["透视表"]
-            self.assertEqual(summary["B2"].value, 23.85)
+            self.assertEqual(summary["B2"].value, 23.76)
             self.assertAlmostEqual(summary["C2"].value, 23.7, places=8)
-            self.assertEqual(summary["B3"].value, 73.07)
+            self.assertEqual(summary["B3"].value, 72.77)
             self.assertEqual(summary["C3"].value, 72.64)
             self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
             self.assertEqual(summary["D3"].value, "=ROUND(C3-B3,2)")
@@ -645,7 +649,7 @@ class SplitterTests(unittest.TestCase):
             )
             summary = result_book["透视表"]
             self.assertEqual(summary["A2"].value, "WEB-SHARED")
-            self.assertAlmostEqual(summary["B2"].value, 74.63, places=12)
+            self.assertAlmostEqual(summary["B2"].value, 74.25, places=12)
             self.assertAlmostEqual(summary["C2"].value, 148.5, places=12)
             result_book.close()
 
@@ -688,10 +692,10 @@ class SplitterTests(unittest.TestCase):
             self.assertLessEqual(result["AC3"].value, result["Z3"].value)
             summary = result_book["透视表"]
             self.assertEqual(summary["A2"].value, "WEB-A")
-            self.assertAlmostEqual(summary["B2"].value, 99.6, places=12)
+            self.assertAlmostEqual(summary["B2"].value, 99, places=12)
             self.assertAlmostEqual(summary["C2"].value, 39.6, places=12)
             self.assertEqual(summary["A3"].value, "WEB-B")
-            self.assertAlmostEqual(summary["B3"].value, 99.4, places=12)
+            self.assertAlmostEqual(summary["B3"].value, 99, places=12)
             self.assertAlmostEqual(summary["C3"].value, 59.4, places=12)
             result_book.close()
 

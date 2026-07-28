@@ -784,29 +784,23 @@ def _prepare_summary_sheet(
     if "透视表" in workbook.sheetnames:
         workbook.remove(workbook["透视表"])
     summary = workbook.create_sheet("透视表")
-    summary.append(["网店订单号", "平均值项:最终金额", "求和项:摊后金额", "差异"])
+    summary.append(["网店订单号", "平均值项:应收合计-1%", "求和项:摊后金额", "差异"])
 
-    final_amounts: OrderedDict[str, list[float]] = OrderedDict()
+    net_receivables: OrderedDict[str, list[float]] = OrderedDict()
     allocated_totals: OrderedDict[str, float] = OrderedDict()
     for row in range(header_row + 1, result_sheet.max_row + 1):
         order = _text(result_sheet.cell(row, layout.sales.web_order_number).value)
         if not order:
             continue
-        final_amounts.setdefault(order, [])
+        net_receivables.setdefault(order, [])
         allocated_totals.setdefault(order, 0.0)
         try:
             receivable = _number(
                 result_sheet.cell(row, layout.sales.receivable).value or 0,
                 f"第 {row} 行应收合计",
             )
-            original_amount = _number(
-                result_sheet.cell(row, layout.sales.original_amount).value or 0,
-                f"第 {row} 行原金额",
-            )
-            final_amounts[order].append(
-                _round_two(
-                    receivable - _round_two(original_amount * 0.01)
-                )
+            net_receivables[order].append(
+                _round_two(receivable - receivable * 0.01)
             )
         except ValueError:
             pass
@@ -822,10 +816,10 @@ def _prepare_summary_sheet(
             except ValueError:
                 pass
 
-    for order in sorted(set(final_amounts) | set(allocated_totals)):
+    for order in sorted(set(net_receivables) | set(allocated_totals)):
         row = summary.max_row + 1
         summary.cell(row, 1, order)
-        values = final_amounts.get(order, [])
+        values = net_receivables.get(order, [])
         summary.cell(
             row,
             2,
