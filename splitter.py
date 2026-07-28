@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_HALF_UP
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,41 @@ OrderProgressCallback = Callable[[int, int], None]
 
 class SplitterError(Exception):
     """An input workbook cannot be processed safely."""
+
+
+TWO_DECIMALS = Decimal("0.01")
+
+
+def _round_two(value: float) -> float:
+    """Round like Excel ROUND(value, 2), not Python's bankers rounding."""
+    return float(
+        Decimal(str(value)).quantize(TWO_DECIMALS, rounding=ROUND_HALF_UP)
+    )
+
+
+def _allocate_two(total: float, weights: Iterable[float]) -> list[float]:
+    """Allocate a two-decimal total and put the cent remainder on the last row."""
+    weight_values = [Decimal(str(value)) for value in weights]
+    if not weight_values:
+        return []
+    weight_total = sum(weight_values)
+    if weight_total == 0:
+        raise ValueError("分摊权重合计不能为 0")
+    target = Decimal(str(_round_two(total)))
+    allocated = Decimal("0")
+    result: list[float] = []
+    for index, weight in enumerate(weight_values):
+        amount = (
+            target - allocated
+            if index == len(weight_values) - 1
+            else (target * weight / weight_total).quantize(
+                TWO_DECIMALS,
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        allocated += amount
+        result.append(float(amount))
+    return result
 
 
 @dataclass
@@ -524,7 +560,8 @@ def _style_new_columns(
             target = sheet.cell(row, col)
             if amount_source.has_style:
                 target._style = copy(amount_source._style)
-        sheet.cell(row, result_columns.allocated_amount).number_format = "0.00"
+        for col in result_columns.all():
+            sheet.cell(row, col).number_format = "0.00"
 
     header_fill = PatternFill("solid", fgColor="245C73")
     result_headers = {
@@ -716,12 +753,12 @@ def _write_result_formulas(
         sheet.cell(
             row,
             layout.result.fee,
-            f"={amount_letter}{row}*1%",
+            f"=ROUND({amount_letter}{row}*1%,2)",
         )
         sheet.cell(
             row,
             layout.result.final_amount,
-            f"={receivable_letter}{row}-{fee_letter}{row}",
+            f"=ROUND({receivable_letter}{row}-{fee_letter}{row},2)",
         )
 
 
@@ -746,16 +783,18 @@ def _prepare_summary_sheet(
         allocated = result_sheet.cell(row, layout.result.split_amount).value
         if _text(allocated) != "":
             try:
-                totals[order] += _number(allocated, f"第 {row} 行拆分金额")
+                totals[order] = _round_two(
+                    totals[order] + _number(allocated, f"第 {row} 行拆分金额")
+                )
             except ValueError:
                 pass
 
     for order in sorted(set(totals) | set(web_targets)):
         row = summary.max_row + 1
         summary.cell(row, 1, order)
-        summary.cell(row, 2, web_targets.get(order, 0.0))
-        summary.cell(row, 3, totals.get(order, 0.0))
-        summary.cell(row, 4, f"=C{row}-B{row}")
+        summary.cell(row, 2, _round_two(web_targets.get(order, 0.0)))
+        summary.cell(row, 3, _round_two(totals.get(order, 0.0)))
+        summary.cell(row, 4, f"=ROUND(C{row}-B{row},2)")
 
     total_row = summary.max_row + 1
     summary.cell(total_row, 1, "总计")
@@ -763,9 +802,9 @@ def _prepare_summary_sheet(
         summary.cell(total_row, 2, 0.0)
         summary.cell(total_row, 3, 0.0)
     else:
-        summary.cell(total_row, 2, f"=SUM(B2:B{total_row - 1})")
-        summary.cell(total_row, 3, f"=SUM(C2:C{total_row - 1})")
-    summary.cell(total_row, 4, f"=C{total_row}-B{total_row}")
+        summary.cell(total_row, 2, f"=ROUND(SUM(B2:B{total_row - 1}),2)")
+        summary.cell(total_row, 3, f"=ROUND(SUM(C2:C{total_row - 1}),2)")
+    summary.cell(total_row, 4, f"=ROUND(C{total_row}-B{total_row},2)")
 
     header_fill = PatternFill("solid", fgColor="245C73")
     for cell in summary[1]:
@@ -913,7 +952,9 @@ def _calculate_rows(
     for group_key, data in group_data.items():
         if data["invalid_reason"] is None:
             receivable = float(data["receivable"])
-            group_targets[group_key] = receivable - receivable * 0.01
+            group_targets[group_key] = _round_two(
+                receivable - receivable * 0.01
+            )
 
     external_group_targets: dict[tuple[str, str, int], float] = {}
     externally_covered_orders: dict[tuple[str, str, int], set[str]] = {}
@@ -934,16 +975,12 @@ def _calculate_rows(
         total_weight = sum(weights)
         if total_weight < 1e-15:
             continue
-        allocated = 0.0
-        for index, (key, weight) in enumerate(zip(valid_keys, weights)):
-            target = (
-                external_total - allocated
-                if index == len(valid_keys) - 1
-                else external_total * weight / total_weight
+        targets = _allocate_two(external_total, weights)
+        for key, target in zip(valid_keys, targets):
+            external_group_targets[key] = _round_two(
+                external_group_targets.get(key, 0.0) + target
             )
-            external_group_targets[key] = external_group_targets.get(key, 0.0) + target
             externally_covered_orders.setdefault(key, set()).add(web_order)
-            allocated += target
 
     for key, target in external_group_targets.items():
         if set(group_data[key]["web_orders"]).issubset(
@@ -1028,30 +1065,34 @@ def _calculate_rows(
                     stats.unmatched_rows += 1
             if not row_weights:
                 row_weights = {row: original_amounts[row] for row in eligible_rows}
-            weight_total = sum(row_weights.values())
-            allocated = 0.0
             weighted_rows = list(row_weights)
+            allocated_amounts = _allocate_two(
+                target_total,
+                [row_weights[row] for row in weighted_rows],
+            )
+            row_amounts = dict(zip(weighted_rows, allocated_amounts))
             for row in eligible_rows:
                 if row not in row_weights:
                     _zero_targets(sheet, row, result_columns)
                     continue
-                ad = (
-                    target_total - allocated
-                    if row == weighted_rows[-1]
-                    else target_total * row_weights[row] / weight_total
-                )
-                allocated += ad
+                ad = row_amounts[row]
                 quantity = quantities[row]
                 aa = ratio_data.prices.get(
                     _code(sheet.cell(row, item_col).value), 0.0
                 )
-                sheet.cell(row, result_columns.bundle_price, aa)
+                sheet.cell(row, result_columns.bundle_price, _round_two(aa))
                 sheet.cell(
                     row,
                     result_columns.ratio,
-                    ad / target_total / quantity if target_total else 0.0,
+                    _round_two(
+                        ad / target_total / quantity if target_total else 0.0
+                    ),
                 )
-                sheet.cell(row, result_columns.split_unit_price, ad / quantity)
+                sheet.cell(
+                    row,
+                    result_columns.split_unit_price,
+                    _round_two(ad / quantity),
+                )
                 sheet.cell(row, result_columns.split_amount, ad)
                 sheet.cell(row, result_columns.allocated_amount, ad)
         else:
@@ -1078,15 +1119,15 @@ def _calculate_rows(
                 }
                 group_weight_total = sum(group_weights.values())
 
-            order_allocated = 0.0
             group_items = list(allocation_groups.items())
-            for group_index, (key, group_rows) in enumerate(group_items):
-                group_target = (
-                    target_total - order_allocated
-                    if group_index == len(group_items) - 1
-                    else target_total * group_weights[key] / group_weight_total
-                )
-                order_allocated += group_target
+            group_targets_for_order = _allocate_two(
+                target_total,
+                [group_weights[key] for key, _ in group_items],
+            )
+            for (key, group_rows), group_target in zip(
+                group_items,
+                group_targets_for_order,
+            ):
                 parent = parents[group_rows[0]]
                 entries = {
                     row: ratio_data.pairs.get(
@@ -1149,28 +1190,36 @@ def _calculate_rows(
                         else:
                             stats.matched_rows += 1
 
-                row_weight_total = sum(row_weights.values())
-                group_allocated = 0.0
-                for row_index, row in enumerate(group_rows):
-                    ad = (
-                        group_target - group_allocated
-                        if row_index == len(group_rows) - 1
-                        else group_target * row_weights[row] / row_weight_total
-                    )
-                    group_allocated += ad
+                row_amounts = _allocate_two(
+                    group_target,
+                    [row_weights[row] for row in group_rows],
+                )
+                for row, ad in zip(group_rows, row_amounts):
                     quantity = quantities[row]
                     aa = (
                         entries[row].price
                         if use_ratio and entries[row] is not None
                         else unit_prices[row]
                     )
-                    sheet.cell(row, result_columns.bundle_price, aa)
+                    sheet.cell(
+                        row,
+                        result_columns.bundle_price,
+                        _round_two(aa),
+                    )
                     sheet.cell(
                         row,
                         result_columns.ratio,
-                        ad / target_total / quantity if target_total else 0.0,
+                        _round_two(
+                            ad / target_total / quantity
+                            if target_total
+                            else 0.0
+                        ),
                     )
-                    sheet.cell(row, result_columns.split_unit_price, ad / quantity)
+                    sheet.cell(
+                        row,
+                        result_columns.split_unit_price,
+                        _round_two(ad / quantity),
+                    )
                     sheet.cell(row, result_columns.split_amount, ad)
                     sheet.cell(row, result_columns.allocated_amount, ad)
 
@@ -1181,8 +1230,11 @@ def _calculate_rows(
     for row in range(header_row + 1, sheet.max_row + 1):
         web_order = _text(sheet.cell(row, web_order_col).value)
         if web_order:
-            web_targets[web_order] = web_targets.get(web_order, 0.0) + float(
-                sheet.cell(row, result_columns.split_amount).value or 0.0
+            web_targets[web_order] = _round_two(
+                web_targets.get(web_order, 0.0)
+                + float(
+                    sheet.cell(row, result_columns.split_amount).value or 0.0
+                )
             )
 
     return stats, web_targets
