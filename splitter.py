@@ -4,6 +4,7 @@ from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
+from math import fsum
 import os
 from pathlib import Path
 import re
@@ -778,34 +779,59 @@ def _prepare_summary_sheet(
     workbook,
     result_sheet,
     header_row: int,
-    web_targets: OrderedDict[str, float],
     layout: ResultLayout,
 ):
     if "透视表" in workbook.sheetnames:
         workbook.remove(workbook["透视表"])
     summary = workbook.create_sheet("透视表")
-    summary.append(["网店订单号", "平均值项:应收合计", "求和项:金额", "差异"])
+    summary.append(["网店订单号", "平均值项:最终金额", "求和项:摊后金额", "差异"])
 
-    totals: OrderedDict[str, float] = OrderedDict()
+    final_amounts: OrderedDict[str, list[float]] = OrderedDict()
+    allocated_totals: OrderedDict[str, float] = OrderedDict()
     for row in range(header_row + 1, result_sheet.max_row + 1):
         order = _text(result_sheet.cell(row, layout.sales.web_order_number).value)
         if not order:
             continue
-        totals.setdefault(order, 0.0)
-        allocated = result_sheet.cell(row, layout.result.split_amount).value
+        final_amounts.setdefault(order, [])
+        allocated_totals.setdefault(order, 0.0)
+        try:
+            receivable = _number(
+                result_sheet.cell(row, layout.sales.receivable).value or 0,
+                f"第 {row} 行应收合计",
+            )
+            original_amount = _number(
+                result_sheet.cell(row, layout.sales.original_amount).value or 0,
+                f"第 {row} 行原金额",
+            )
+            final_amounts[order].append(
+                _round_two(
+                    receivable - _round_two(original_amount * 0.01)
+                )
+            )
+        except ValueError:
+            pass
+        allocated = result_sheet.cell(
+            row, layout.result.allocated_amount
+        ).value
         if _text(allocated) != "":
             try:
-                totals[order] = _round_two(
-                    totals[order] + _number(allocated, f"第 {row} 行拆分金额")
+                allocated_totals[order] = _round_two(
+                    allocated_totals[order]
+                    + _number(allocated, f"第 {row} 行摊后金额")
                 )
             except ValueError:
                 pass
 
-    for order in sorted(set(totals) | set(web_targets)):
+    for order in sorted(set(final_amounts) | set(allocated_totals)):
         row = summary.max_row + 1
         summary.cell(row, 1, order)
-        summary.cell(row, 2, _round_two(web_targets.get(order, 0.0)))
-        summary.cell(row, 3, _round_two(totals.get(order, 0.0)))
+        values = final_amounts.get(order, [])
+        summary.cell(
+            row,
+            2,
+            _round_two(fsum(values) / len(values)) if values else 0.0,
+        )
+        summary.cell(row, 3, _round_two(allocated_totals.get(order, 0.0)))
         summary.cell(row, 4, f"=ROUND(C{row}-B{row},2)")
 
     total_row = summary.max_row + 1
@@ -840,15 +866,12 @@ def _prepare_summary_sheet(
     if "汇总" in workbook.sheetnames:
         workbook.remove(workbook["汇总"])
     totals = workbook.create_sheet("汇总")
-    totals.append(["原金额", f"='透视表'!B{total_row}"])
-    fee_letter = get_column_letter(layout.result.fee)
-    allocated_letter = get_column_letter(layout.result.allocated_amount)
-    totals.append(["手续费", f"=SUM('拆分结果'!{fee_letter}:{fee_letter})"])
-    totals.append(["摊后金额", f"=SUM('拆分结果'!{allocated_letter}:{allocated_letter})"])
-    totals.append(["差异", "=B1-B2-B3"])
+    totals.append(["最终金额", f"='透视表'!B{total_row}"])
+    totals.append(["摊后金额", f"='透视表'!C{total_row}"])
+    totals.append(["差异", "=B2-B1"])
     totals.column_dimensions["A"].width = 14
     totals.column_dimensions["B"].width = 18
-    for row in range(1, 5):
+    for row in range(1, 4):
         totals.cell(row, 1).font = Font(
             name="Microsoft YaHei UI",
             size=10,
@@ -1392,7 +1415,7 @@ def process_workbooks(
         )
         order_amounts = _load_cached_order_amounts(cached_workbook)
         report(60, "按订单计算拆分单价")
-        stats, web_targets = _calculate_rows(
+        stats, _web_targets = _calculate_rows(
             result_sheet,
             header_row,
             layout,
@@ -1408,7 +1431,6 @@ def process_workbooks(
             workbook,
             result_sheet,
             header_row,
-            web_targets,
             layout,
         )
         _enable_formula_recalculation(workbook)
