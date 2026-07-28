@@ -845,6 +845,76 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 0)
             self.assertEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 0)
 
+    def test_positive_receivable_all_zero_order_uses_ratio_or_quantity_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = (
+                root / "ratio.xlsx",
+                root / "sales.xlsx",
+                root / "output.xlsx",
+            )
+            make_new_ratio(ratio)
+            ratio_book = load_workbook(ratio)
+            ratio_book["sheet11"]["M2"] = 0
+            ratio_book.save(ratio)
+            ratio_book.close()
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for (
+                order,
+                logistics,
+                web_order,
+                receivable,
+                item,
+                quantity,
+                note,
+            ) in (
+                (
+                    "ORDER-1",
+                    "TRACKING-1",
+                    "WEB-1",
+                    26,
+                    "SKU1",
+                    5,
+                    "编号:A;",
+                ),
+                (
+                    "ORDER-2",
+                    "TRACKING-2",
+                    "WEB-2",
+                    21,
+                    "MISS",
+                    1,
+                    "编号:UNKNOWN;",
+                ),
+            ):
+                row = [""] * len(SALES_HEADERS)
+                row[1] = order
+                row[9] = logistics
+                row[10] = web_order
+                row[13] = receivable
+                row[21] = item
+                row[24] = quantity
+                row[25] = 0
+                row[28] = 0
+                row[30] = note
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.exceptional_orders, 0)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertEqual(result["AA2"].value, 0)
+            self.assertEqual(result["AD2"].value, 25.74)
+            self.assertEqual(result["AJ2"].value, 25.74)
+            self.assertEqual(result["AD3"].value, 20.79)
+            self.assertEqual(result["AJ3"].value, 20.79)
+
     def test_source_files_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

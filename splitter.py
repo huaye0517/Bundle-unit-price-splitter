@@ -1038,12 +1038,21 @@ def _calculate_rows(
                 order_progress(order_index, total_orders)
             continue
 
+        recovered_zero_group = False
         if not eligible_rows:
-            original_total = sum(original_amounts.values())
-            if abs(original_total) < 1e-15:
-                invalid_reason = "整单单价或原金额合计为 0，无法分摊订单金额"
+            fallback_rows = [
+                row for row in rows if abs(quantities[row]) >= 1e-15
+            ]
+            if fallback_rows:
+                eligible_rows = fallback_rows
+                recovered_zero_group = True
+                stats.unmatched_rows -= len(fallback_rows)
             else:
-                invalid_reason = "非零金额行的单价均为 0，无法按比例拆分"
+                original_total = sum(original_amounts.values())
+                if abs(original_total) < 1e-15:
+                    invalid_reason = "整单单价或原金额合计为 0，且没有可分摊数量"
+                else:
+                    invalid_reason = "非零金额行的单价均为 0，无法按比例拆分"
         if invalid_reason:
             stats.exceptional_orders += 1
             stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
@@ -1065,6 +1074,10 @@ def _calculate_rows(
                     stats.unmatched_rows += 1
             if not row_weights:
                 row_weights = {row: original_amounts[row] for row in eligible_rows}
+            if abs(sum(row_weights.values())) < 1e-15:
+                row_weights = {
+                    row: abs(quantities[row]) for row in eligible_rows
+                }
             weighted_rows = list(row_weights)
             allocated_amounts = _allocate_two(
                 target_total,
@@ -1118,6 +1131,12 @@ def _calculate_rows(
                     for key, group_rows in allocation_groups.items()
                 }
                 group_weight_total = sum(group_weights.values())
+            if abs(group_weight_total) < 1e-15:
+                group_weights = {
+                    key: sum(abs(quantities[row]) for row in group_rows)
+                    for key, group_rows in allocation_groups.items()
+                }
+                group_weight_total = sum(group_weights.values())
 
             group_items = list(allocation_groups.items())
             group_targets_for_order = _allocate_two(
@@ -1137,8 +1156,11 @@ def _calculate_rows(
                 }
                 use_ratio = bool(parent) and all(
                     entry is not None
-                    and abs(entry.price) >= 1e-15
                     and abs(entry.ratio) >= 1e-15
+                    and (
+                        recovered_zero_group
+                        or abs(entry.price) >= 1e-15
+                    )
                     for entry in entries.values()
                 )
 
@@ -1178,7 +1200,11 @@ def _calculate_rows(
                     if abs(sum(row_weights.values())) < 1e-15:
                         row_weights = {
                             row: abs(original_amounts[row]) for row in group_rows
-                    }
+                        }
+                    if abs(sum(row_weights.values())) < 1e-15:
+                        row_weights = {
+                            row: abs(quantities[row]) for row in group_rows
+                        }
                     for row in group_rows:
                         entry = entries[row]
                         if (
