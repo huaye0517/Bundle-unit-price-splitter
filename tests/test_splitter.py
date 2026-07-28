@@ -10,6 +10,7 @@ from splitter import (
     SplitterError,
     _enable_formula_recalculation,
     _freeze_cached_amounts,
+    _round_two,
     process_workbooks,
     ratio_file_info,
     update_ratio_data,
@@ -86,6 +87,66 @@ def add_order_amounts(path: Path, amounts: list[tuple[str, float]]) -> None:
 
 
 class SplitterTests(unittest.TestCase):
+    def test_round_two_uses_standard_half_up_rounding(self):
+        self.assertEqual(_round_two(1.005), 1.01)
+        self.assertEqual(_round_two(-1.005), -1.01)
+        self.assertEqual(_round_two(1.004), 1.0)
+
+    def test_rounding_remainder_keeps_order_total_at_two_decimals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = (
+                root / "ratio.xlsx",
+                root / "sales.xlsx",
+                root / "output.xlsx",
+            )
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for index in range(3):
+                row = [""] * len(SALES_HEADERS)
+                row[1] = f"ORDER-{index + 1}"
+                row[9] = "TRACKING-1"
+                row[10] = "WEB-1"
+                row[13] = 100.01
+                row[21] = "SKU1"
+                row[24] = 1
+                row[25] = 1
+                row[28] = 1
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            process_workbooks(ratio, sales, output)
+
+            result_book = load_workbook(output, data_only=False)
+            result = result_book["拆分结果"]
+            self.assertEqual(
+                [result.cell(row, 30).value for row in range(2, 5)],
+                [33.0, 33.0, 33.01],
+            )
+            self.assertAlmostEqual(
+                sum(result.cell(row, 30).value for row in range(2, 5)),
+                99.01,
+                places=8,
+            )
+            for row in range(2, 5):
+                for column in (27, 28, 29, 30, 36):
+                    value = result.cell(row, column).value
+                    self.assertEqual(value, _round_two(value))
+                    self.assertEqual(result.cell(row, column).number_format, "0.00")
+                self.assertEqual(
+                    result.cell(row, 30).value,
+                    result.cell(row, 36).value,
+                )
+            summary = result_book["透视表"]
+            self.assertEqual(summary["B2"].value, 99.01)
+            self.assertEqual(summary["C2"].value, 99.01)
+            self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
+            result_book.close()
+
     def test_missing_calculation_properties_are_initialized(self):
         workbook = Workbook()
         workbook.calculation = None
@@ -149,13 +210,13 @@ class SplitterTests(unittest.TestCase):
             result_book = load_workbook(output, data_only=False)
             result = result_book["拆分结果"]
             self.assertEqual([result.cell(row, 14).value for row in range(2, 12)], [187.5] * 10)
-            net_total = 10 * (187.5 - 187.5 * 0.01)
+            net_total = 10 * 185.63
             self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 12)), net_total, places=8)
             self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 12)), net_total, places=8)
             for row in range(2, 12):
                 self.assertAlmostEqual(result.cell(row, 30).value, result.cell(row, 36).value, places=8)
-                self.assertEqual(result.cell(row, 34).value, f"=AG{row}*1%")
-                self.assertEqual(result.cell(row, 35).value, f"=N{row}-AH{row}")
+                self.assertEqual(result.cell(row, 34).value, f"=ROUND(AG{row}*1%,2)")
+                self.assertEqual(result.cell(row, 35).value, f"=ROUND(N{row}-AH{row},2)")
             self.assertEqual(result["AH1"].value, "手续费1%")
             self.assertEqual(result["AI1"].value, "最终金额")
             self.assertEqual(result["AJ1"].value, "摊后金额")
@@ -169,11 +230,11 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(summary["A2"].value, "PO-260629-323800286823316")
             self.assertEqual(summary["B2"].value, net_total)
             self.assertAlmostEqual(summary["C2"].value, net_total, places=8)
-            self.assertEqual(summary["D2"].value, "=C2-B2")
+            self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
             self.assertEqual(summary["A3"].value, "总计")
-            self.assertEqual(summary["B3"].value, "=SUM(B2:B2)")
-            self.assertEqual(summary["C3"].value, "=SUM(C2:C2)")
-            self.assertEqual(summary["D3"].value, "=C3-B3")
+            self.assertEqual(summary["B3"].value, "=ROUND(SUM(B2:B2),2)")
+            self.assertEqual(summary["C3"].value, "=ROUND(SUM(C2:C2),2)")
+            self.assertEqual(summary["D3"].value, "=ROUND(C3-B3,2)")
             self.assertEqual(len(getattr(summary, "_pivots", [])), 0)
             self.assertEqual(result_book.calculation.calcMode, "auto")
             self.assertTrue(result_book.calculation.fullCalcOnLoad)
@@ -213,10 +274,10 @@ class SplitterTests(unittest.TestCase):
             summary = result["透视表"]
             self.assertEqual(summary["B2"].value, 23.76)
             self.assertAlmostEqual(summary["C2"].value, 23.76, places=8)
-            self.assertAlmostEqual(summary["B3"].value, 72.765, places=8)
-            self.assertAlmostEqual(summary["C3"].value, 72.765, places=8)
-            self.assertEqual(summary["D2"].value, "=C2-B2")
-            self.assertEqual(summary["D3"].value, "=C3-B3")
+            self.assertEqual(summary["B3"].value, 72.77)
+            self.assertEqual(summary["C3"].value, 72.77)
+            self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
+            self.assertEqual(summary["D3"].value, "=ROUND(C3-B3,2)")
             result.close()
 
     def test_conflicting_receivable_totals_mark_only_that_order_exceptional(self):
@@ -261,8 +322,8 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(stats.orders, 1)
             self.assertEqual(stats.exceptional_orders, 0)
             result = load_workbook(output, data_only=True)["拆分结果"]
-            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 185.625, places=8)
-            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 185.625, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 185.63, places=8)
+            self.assertAlmostEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 185.63, places=8)
 
     def test_append_ratio_data_adds_new_bundle_items_without_overwriting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -753,8 +814,8 @@ class SplitterTests(unittest.TestCase):
             self.assertAlmostEqual(result.cell(3, bundle_col + 3).value, 59.4, places=12)
             self.assertAlmostEqual(result.cell(2, fee_col + 2).value, 39.6, places=12)
             self.assertAlmostEqual(result.cell(3, fee_col + 2).value, 59.4, places=12)
-            self.assertEqual(result.cell(2, fee_col).value, "=G2*1%")
-            self.assertEqual(result.cell(2, fee_col + 1).value, "=D2-H2")
+            self.assertEqual(result.cell(2, fee_col).value, "=ROUND(G2*1%,2)")
+            self.assertEqual(result.cell(2, fee_col + 1).value, "=ROUND(D2-H2,2)")
             self.assertEqual(result["Q1"].value, "备注")
             self.assertEqual(result.auto_filter.ref, "A1:Q3")
             summary = result_book["透视表"]
