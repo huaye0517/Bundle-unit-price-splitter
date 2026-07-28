@@ -87,7 +87,7 @@ internal sealed class SplitterForm : Form
 
         content.Controls.Add(MakeLabel("BUNDLE / UNIT LEDGER", new Font("Consolas", 9F, FontStyle.Bold), Teal), 0, 0);
         content.Controls.Add(MakeLabel("组合装单价拆分", new Font("Microsoft YaHei UI", 24F, FontStyle.Bold), Ink), 0, 1);
-        content.Controls.Add(MakeLabel("读取 Sheet1 订单金额，按网店订单完成 AA、AB、AC、AD、AH 计算。", BodyFont, Muted), 0, 2);
+        content.Controls.Add(MakeLabel("按列头自动识别订单、物流、应收、货品、数量、单价、金额和备注。", BodyFont, Muted), 0, 2);
 
         ratioPathLabel = MakePathLabel("正在准备内置基础数据…");
         appendRatioRadio = MakeRadio("新增", true);
@@ -95,7 +95,7 @@ internal sealed class SplitterForm : Form
         ratioUpdateButton = MakeButton("选择更新文件", false, ChooseRatioUpdate);
         content.Controls.Add(MakeRatioDataCard(), 0, 3);
         salesPathLabel = MakePathLabel("尚未选择文件 · 也可将 .xlsx 拖到这里");
-        var salesCard = MakeFileCard("销售单原表", "拖入销售单，按网店订单号引用 Sheet1 订单金额", salesPathLabel, ChooseSales);
+        var salesCard = MakeFileCard("销售单原表", "拖入不同列布局的销售单，自动按列头名匹配", salesPathLabel, ChooseSales);
         EnableExcelDrop(salesCard, DropSales);
         content.Controls.Add(salesCard, 0, 5);
 
@@ -110,7 +110,7 @@ internal sealed class SplitterForm : Form
         ledger.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         var ledgerTitle = MakeLabel("金额核对", new Font("Microsoft YaHei UI", 11F, FontStyle.Bold), Ink);
         ledgerTitle.Margin = new Padding(0);
-        balanceLabel = MakeLabel("等待计算 · 订单金额 —  拆分 —  差额 —", new Font("Consolas", 10F, FontStyle.Bold), Teal);
+        balanceLabel = MakeLabel("等待计算 · 应收合计 —  拆分 —  差额 —", new Font("Consolas", 10F, FontStyle.Bold), Teal);
         balanceLabel.BackColor = TealSoft; balanceLabel.Padding = new Padding(12, 0, 12, 0); balanceLabel.Margin = new Padding(0);
         progressBar = new ProgressBar { Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 4), Style = ProgressBarStyle.Continuous };
         statusLabel = MakeLabel("基础库已内置，拖入销售单后开始拆分", BodyFont, Muted);
@@ -338,7 +338,7 @@ internal sealed class SplitterForm : Form
     {
         if (string.IsNullOrEmpty(salesPath)) { MessageBox.Show("请先选择或拖入销售单原表。", "还缺销售单", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         generateButton.Enabled = false; progressBar.Style = ProgressBarStyle.Continuous; progressBar.Value = 0;
-        statusLabel.Text = "正在读取数据并按网店订单计算"; balanceLabel.Text = "正在核对 · 订单金额计算中  拆分计算中  差额计算中";
+        statusLabel.Text = "正在按列头识别数据并计算"; balanceLabel.Text = "正在核对 · 应收合计计算中  拆分计算中  差额计算中";
         bool succeeded = false;
         try {
             var result = await Task.Run(() => RunWorker(UpdateProgress));

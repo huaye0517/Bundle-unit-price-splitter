@@ -712,6 +712,78 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(result["AA2"].value, 25)
             self.assertAlmostEqual(result["AD2"].value, 24.75, places=12)
 
+    def test_shuffled_sales_columns_are_matched_by_header_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            headers = [
+                "订单编号",
+                "物流单号",
+                "网店订单号",
+                "应收合计",
+                "货品编号",
+                "数量",
+                "金额",
+                "额外字段",
+                "单价",
+                "备注",
+            ]
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "sheetTitle"
+            ws.append(headers)
+            ws.append(["ORDER-1", "LOG-1", "WEB-1", 100, "SKU1", 1, 50, "保留", 50, ""])
+            ws.append(["ORDER-1", "LOG-1", "WEB-1", None, "SKU2", 2, 50, "保留", 25, ""])
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.exceptional_orders, 0)
+            result_book = load_workbook(output, data_only=False)
+            result = result_book["拆分结果"]
+            result_headers = [
+                result.cell(1, column).value
+                for column in range(1, result.max_column + 1)
+            ]
+            bundle_col = result_headers.index("组合装单价") + 1
+            fee_col = result_headers.index("手续费1%") + 1
+            self.assertAlmostEqual(result.cell(2, bundle_col + 3).value, 39.6, places=12)
+            self.assertAlmostEqual(result.cell(3, bundle_col + 3).value, 59.4, places=12)
+            self.assertAlmostEqual(result.cell(2, fee_col + 2).value, 39.6, places=12)
+            self.assertAlmostEqual(result.cell(3, fee_col + 2).value, 59.4, places=12)
+            self.assertEqual(result.cell(2, fee_col).value, "=G2*1%")
+            self.assertEqual(result.cell(2, fee_col + 1).value, "=D2-H2")
+            self.assertEqual(result["Q1"].value, "备注")
+            self.assertEqual(result.auto_filter.ref, "A1:Q3")
+            summary = result_book["透视表"]
+            self.assertAlmostEqual(summary["B2"].value, 99, places=12)
+            self.assertAlmostEqual(summary["C2"].value, 99, places=12)
+            result_book.close()
+
+    def test_zero_receivable_order_is_valid_without_source_amount(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            wb = load_workbook(sales)
+            ws = wb["销售明细"]
+            for row in range(2, 5):
+                ws.cell(row, 14, 0)
+                ws.cell(row, 26, 0)
+                ws.cell(row, 29, 0)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output)
+
+            self.assertEqual(stats.exceptional_orders, 0)
+            result = load_workbook(output, data_only=True)["拆分结果"]
+            self.assertEqual(sum(result.cell(row, 30).value for row in range(2, 5)), 0)
+            self.assertEqual(sum(result.cell(row, 36).value for row in range(2, 5)), 0)
+
     def test_source_files_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

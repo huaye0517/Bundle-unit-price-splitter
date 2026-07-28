@@ -57,17 +57,61 @@ class RatioData:
     has_parent_ratios: bool
 
 
-SALES_HEADERS = {
+@dataclass(frozen=True)
+class SalesColumns:
+    order_number: int
+    logistics_number: int
+    web_order_number: int
+    receivable: int
+    item_code: int
+    quantity: int
+    unit_price: int
+    original_amount: int
+    note: int
+
+
+@dataclass(frozen=True)
+class ResultColumns:
+    bundle_price: int
+    ratio: int
+    split_unit_price: int
+    split_amount: int
+    fee: int
+    final_amount: int
+    allocated_amount: int
+
+    def all(self) -> tuple[int, ...]:
+        return (
+            self.bundle_price,
+            self.ratio,
+            self.split_unit_price,
+            self.split_amount,
+            self.fee,
+            self.final_amount,
+            self.allocated_amount,
+        )
+
+
+@dataclass(frozen=True)
+class ResultLayout:
+    sales: SalesColumns
+    result: ResultColumns
+    source_columns: tuple[int, ...]
+
+
+SALES_REQUIRED_HEADERS = {
     "订单编号",
+    "物流单号",
+    "网店订单号",
     "应收合计",
     "货品编号",
     "数量",
     "单价",
-    "优惠",
-    "折扣",
     "金额",
-    "锁定待发",
+    "备注",
 }
+# Kept as a public compatibility alias for existing integrations and tests.
+SALES_HEADERS = SALES_REQUIRED_HEADERS
 
 RATIO_SCHEMAS = (
     (
@@ -87,15 +131,8 @@ RATIO_SCHEMAS = (
         "sheet1",
     ),
 )
-RESULT_HEADERS = {
-    27: "组合装单价",  # AA
-    28: "占比",        # AB
-    29: "单价",        # AC
-    30: "金额",        # AD
-    34: "手续费1%",    # AH
-    35: "最终金额",    # AI
-    36: "摊后金额",    # AJ
-}
+SPLIT_RESULT_HEADERS = ("组合装单价", "占比", "单价", "金额")
+AMOUNT_RESULT_HEADERS = ("手续费1%", "最终金额", "摊后金额")
 
 
 def _text(value: object) -> str:
@@ -145,6 +182,29 @@ def _header_map(sheet, header_row: int) -> dict[str, int]:
         if name and name not in result:
             result[name] = column
     return result
+
+
+def _sales_columns(sheet, header_row: int) -> SalesColumns:
+    headers = _header_map(sheet, header_row)
+    missing = SALES_REQUIRED_HEADERS.difference(headers)
+    if missing:
+        raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
+    amount_columns = [
+        column
+        for column in range(1, sheet.max_column + 1)
+        if _text(sheet.cell(header_row, column).value) == "金额"
+    ]
+    return SalesColumns(
+        order_number=headers["订单编号"],
+        logistics_number=headers["物流单号"],
+        web_order_number=headers["网店订单号"],
+        receivable=headers["应收合计"],
+        item_code=headers["货品编号"],
+        quantity=headers["数量"],
+        unit_price=headers["单价"],
+        original_amount=amount_columns[-1],
+        note=headers["备注"],
+    )
 
 
 def _ratio_sheet_info(workbook):
@@ -398,22 +458,27 @@ def update_ratio_data(
     return RatioUpdateStats(mode, added_rows, source_rows, unique_items)
 
 
-def _copy_column_layout(sheet, old_layout: dict[int, dict[str, object]]) -> None:
-    mapping: dict[int, int] = {}
-    for old_col in range(1, 27):
-        mapping[old_col] = old_col
-    for old_col in range(27, 30):
-        mapping[old_col] = old_col + 4
-    for old_col in range(30, 35):
-        mapping[old_col] = old_col + 7
-
+def _copy_column_layout(
+    sheet,
+    old_layout: dict[int, dict[str, object]],
+    mapping: dict[int, int],
+    result_columns: ResultColumns,
+) -> None:
     for old_col, new_col in mapping.items():
         props = old_layout.get(old_col, {})
         dim = sheet.column_dimensions[get_column_letter(new_col)]
         for name, value in props.items():
             setattr(dim, name, value)
 
-    widths = {27: 16, 28: 15, 29: 16, 30: 16, 34: 13, 35: 13, 36: 16}
+    widths = {
+        result_columns.bundle_price: 16,
+        result_columns.ratio: 15,
+        result_columns.split_unit_price: 16,
+        result_columns.split_amount: 16,
+        result_columns.fee: 13,
+        result_columns.final_amount: 13,
+        result_columns.allocated_amount: 16,
+    }
     for col, width in widths.items():
         sheet.column_dimensions[get_column_letter(col)].width = width
 
@@ -432,26 +497,46 @@ def _capture_column_layout(sheet) -> dict[int, dict[str, object]]:
     return layout
 
 
-def _style_new_columns(sheet, header_row: int) -> None:
-    source_style_col = 26  # Z
-    amount_style_col = 33  # AG, the original 金额 after the first insertion
-
+def _style_new_columns(
+    sheet,
+    header_row: int,
+    sales_columns: SalesColumns,
+    result_columns: ResultColumns,
+) -> None:
     for row in range(1, sheet.max_row + 1):
-        source = sheet.cell(row, source_style_col)
-        for col in (27, 28, 29, 30):
+        source = sheet.cell(row, sales_columns.unit_price)
+        for col in (
+            result_columns.bundle_price,
+            result_columns.ratio,
+            result_columns.split_unit_price,
+            result_columns.split_amount,
+        ):
             target = sheet.cell(row, col)
             if source.has_style:
                 target._style = copy(source._style)
             target.number_format = "0.00"
-        amount_source = sheet.cell(row, amount_style_col)
-        for col in (34, 35, 36):
+        amount_source = sheet.cell(row, sales_columns.original_amount)
+        for col in (
+            result_columns.fee,
+            result_columns.final_amount,
+            result_columns.allocated_amount,
+        ):
             target = sheet.cell(row, col)
             if amount_source.has_style:
                 target._style = copy(amount_source._style)
-        sheet.cell(row, 36).number_format = "0.00"
+        sheet.cell(row, result_columns.allocated_amount).number_format = "0.00"
 
     header_fill = PatternFill("solid", fgColor="245C73")
-    for col, title in RESULT_HEADERS.items():
+    result_headers = {
+        result_columns.bundle_price: SPLIT_RESULT_HEADERS[0],
+        result_columns.ratio: SPLIT_RESULT_HEADERS[1],
+        result_columns.split_unit_price: SPLIT_RESULT_HEADERS[2],
+        result_columns.split_amount: SPLIT_RESULT_HEADERS[3],
+        result_columns.fee: AMOUNT_RESULT_HEADERS[0],
+        result_columns.final_amount: AMOUNT_RESULT_HEADERS[1],
+        result_columns.allocated_amount: AMOUNT_RESULT_HEADERS[2],
+    }
+    for col, title in result_headers.items():
         cell = sheet.cell(header_row, col, title)
         cell.fill = header_fill
         cell.font = Font(name="Microsoft YaHei UI", size=10, bold=True, color="FFFFFF")
@@ -459,14 +544,15 @@ def _style_new_columns(sheet, header_row: int) -> None:
 
 
 def _extend_auto_filter(sheet, header_row: int) -> None:
+    end_column = get_column_letter(sheet.max_column)
     if sheet.auto_filter and sheet.auto_filter.ref:
         ref = sheet.auto_filter.ref
         if ":" in ref:
             start, end = ref.split(":", 1)
             end_row = "".join(ch for ch in end if ch.isdigit()) or str(sheet.max_row)
-            sheet.auto_filter.ref = f"{start}:AO{end_row}"
+            sheet.auto_filter.ref = f"{start}:{end_column}{end_row}"
             return
-    sheet.auto_filter.ref = f"A{header_row}:AO{sheet.max_row}"
+    sheet.auto_filter.ref = f"A{header_row}:{end_column}{sheet.max_row}"
 
 
 def _refresh_pivots_on_open(workbook) -> None:
@@ -536,31 +622,107 @@ def _load_cached_order_amounts(cached_workbook) -> dict[str, float]:
     return order_amounts
 
 
-def _prepare_result_sheet(workbook, source_sheet, header_row: int):
+def _prepare_result_sheet(
+    workbook,
+    source_sheet,
+    header_row: int,
+) -> tuple[object, ResultLayout]:
     old_layout = _capture_column_layout(source_sheet)
+    source_sales = _sales_columns(source_sheet, header_row)
     if "拆分结果" in workbook.sheetnames:
         workbook.remove(workbook["拆分结果"])
     result_sheet = workbook.copy_worksheet(source_sheet)
     result_sheet.title = "拆分结果"
-    result_sheet.insert_cols(27, amount=4)
-    result_sheet.insert_cols(34, amount=3)
-    _copy_column_layout(result_sheet, old_layout)
-    _style_new_columns(result_sheet, header_row)
+
+    sales_positions = {
+        name: getattr(source_sales, name)
+        for name in SalesColumns.__dataclass_fields__
+    }
+    source_positions = {
+        column: column for column in range(1, source_sheet.max_column + 1)
+    }
+    result_positions: dict[str, int] = {}
+    insertions = (
+        (
+            source_sales.unit_price + 1,
+            (
+                ("bundle_price", SPLIT_RESULT_HEADERS[0]),
+                ("ratio", SPLIT_RESULT_HEADERS[1]),
+                ("split_unit_price", SPLIT_RESULT_HEADERS[2]),
+                ("split_amount", SPLIT_RESULT_HEADERS[3]),
+            ),
+        ),
+        (
+            source_sales.original_amount + 1,
+            (
+                ("fee", AMOUNT_RESULT_HEADERS[0]),
+                ("final_amount", AMOUNT_RESULT_HEADERS[1]),
+                ("allocated_amount", AMOUNT_RESULT_HEADERS[2]),
+            ),
+        ),
+    )
+    for insert_at, columns in sorted(insertions, reverse=True):
+        count = len(columns)
+        result_sheet.insert_cols(insert_at, amount=count)
+        sales_positions = {
+            name: column + count if column >= insert_at else column
+            for name, column in sales_positions.items()
+        }
+        source_positions = {
+            old: column + count if column >= insert_at else column
+            for old, column in source_positions.items()
+        }
+        result_positions = {
+            name: column + count if column >= insert_at else column
+            for name, column in result_positions.items()
+        }
+        for offset, (name, title) in enumerate(columns):
+            column = insert_at + offset
+            result_positions[name] = column
+            result_sheet.cell(header_row, column, title)
+
+    sales_columns = SalesColumns(**sales_positions)
+    result_columns = ResultColumns(**result_positions)
+    layout = ResultLayout(
+        sales=sales_columns,
+        result=result_columns,
+        source_columns=tuple(source_positions.values()),
+    )
+    _copy_column_layout(result_sheet, old_layout, source_positions, result_columns)
+    _style_new_columns(result_sheet, header_row, sales_columns, result_columns)
     _extend_auto_filter(result_sheet, header_row)
-    return result_sheet
+    return result_sheet, layout
 
 
-def _zero_targets(sheet, row: int) -> None:
-    for col in RESULT_HEADERS:
+def _zero_targets(sheet, row: int, result_columns: ResultColumns) -> None:
+    for col in result_columns.all():
         sheet.cell(row, col, 0.0)
 
 
-def _write_result_formulas(sheet, header_row: int) -> None:
+def _write_result_formulas(
+    sheet,
+    header_row: int,
+    layout: ResultLayout,
+) -> None:
+    amount_letter = get_column_letter(layout.sales.original_amount)
+    receivable_letter = get_column_letter(layout.sales.receivable)
+    fee_letter = get_column_letter(layout.result.fee)
     for row in range(header_row + 1, sheet.max_row + 1):
-        if all(sheet.cell(row, col).value is None for col in range(1, 27)):
+        if all(
+            sheet.cell(row, col).value is None
+            for col in layout.source_columns
+        ):
             continue
-        sheet.cell(row, 34, f"=AG{row}*1%")
-        sheet.cell(row, 35, f"=N{row}-AH{row}")
+        sheet.cell(
+            row,
+            layout.result.fee,
+            f"={amount_letter}{row}*1%",
+        )
+        sheet.cell(
+            row,
+            layout.result.final_amount,
+            f"={receivable_letter}{row}-{fee_letter}{row}",
+        )
 
 
 def _prepare_summary_sheet(
@@ -568,6 +730,7 @@ def _prepare_summary_sheet(
     result_sheet,
     header_row: int,
     web_targets: OrderedDict[str, float],
+    layout: ResultLayout,
 ):
     if "透视表" in workbook.sheetnames:
         workbook.remove(workbook["透视表"])
@@ -576,11 +739,11 @@ def _prepare_summary_sheet(
 
     totals: OrderedDict[str, float] = OrderedDict()
     for row in range(header_row + 1, result_sheet.max_row + 1):
-        order = _text(result_sheet.cell(row, 11).value)
+        order = _text(result_sheet.cell(row, layout.sales.web_order_number).value)
         if not order:
             continue
         totals.setdefault(order, 0.0)
-        allocated = result_sheet.cell(row, 30).value
+        allocated = result_sheet.cell(row, layout.result.split_amount).value
         if _text(allocated) != "":
             try:
                 totals[order] += _number(allocated, f"第 {row} 行拆分金额")
@@ -612,6 +775,7 @@ def _prepare_summary_sheet(
     for cell in summary[total_row]:
         cell.font = Font(name="Microsoft YaHei UI", size=10, bold=True)
     for row in range(2, total_row + 1):
+        summary.cell(row, 1).number_format = "@"
         for col in range(2, 5):
             summary.cell(row, col).number_format = "0.00_);[Red]\\(0.00\\)"
     summary.column_dimensions["A"].width = 36
@@ -640,44 +804,29 @@ def _mother_code(note: object) -> str:
 def _calculate_rows(
     sheet,
     header_row: int,
+    layout: ResultLayout,
     ratio_data: RatioData,
     order_amounts: dict[str, float],
     order_progress: OrderProgressCallback | None = None,
 ) -> tuple[SplitStats, OrderedDict[str, float]]:
-    headers = _header_map(sheet, header_row)
-    # These columns are unchanged by insertions because they all sit at or before Z.
-    required = {
-        "订单编号",
-        "物流单号",
-        "网店订单号",
-        "应收合计",
-        "货品编号",
-        "数量",
-        "单价",
-        "金额",
-        "备注",
-    }
-    missing = required.difference(headers)
-    if missing:
-        raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
-
-    order_col = headers["订单编号"]
-    logistics_col = headers["物流单号"]
-    web_order_col = headers["网店订单号"]
-    total_col = headers["应收合计"]
-    item_col = headers["货品编号"]
-    quantity_col = headers["数量"]
-    unit_price_col = headers["单价"]
-    note_col = headers["备注"]
-    original_amount_col = max(
-        col
-        for col in range(1, sheet.max_column + 1)
-        if _text(sheet.cell(header_row, col).value) == "金额"
-    )
+    sales_columns = layout.sales
+    result_columns = layout.result
+    order_col = sales_columns.order_number
+    logistics_col = sales_columns.logistics_number
+    web_order_col = sales_columns.web_order_number
+    total_col = sales_columns.receivable
+    item_col = sales_columns.item_code
+    quantity_col = sales_columns.quantity
+    unit_price_col = sales_columns.unit_price
+    note_col = sales_columns.note
+    original_amount_col = sales_columns.original_amount
 
     groups: OrderedDict[tuple[str, str, int], list[int]] = OrderedDict()
     for row in range(header_row + 1, sheet.max_row + 1):
-        if all(sheet.cell(row, col).value is None for col in range(1, 27)):
+        if all(
+            sheet.cell(row, col).value is None
+            for col in layout.source_columns
+        ):
             continue
         logistics_number = _text(sheet.cell(row, logistics_col).value)
         order_number = _text(sheet.cell(row, order_col).value)
@@ -811,7 +960,7 @@ def _calculate_rows(
             stats.exceptional_orders += 1
             stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
             for row in rows:
-                _zero_targets(sheet, row)
+                _zero_targets(sheet, row, result_columns)
             if order_progress:
                 order_progress(order_index, total_orders)
             continue
@@ -820,6 +969,14 @@ def _calculate_rows(
         unit_prices: dict[int, float] = data["unit_prices"]
         quantities: dict[int, float] = data["quantities"]
         target_total = group_targets[group_key]
+
+        if abs(target_total) < 1e-15:
+            for row in rows:
+                _zero_targets(sheet, row, result_columns)
+            stats.unmatched_rows += len(rows)
+            if order_progress:
+                order_progress(order_index, total_orders)
+            continue
 
         eligible_rows: list[int] = []
         for row in rows:
@@ -832,14 +989,14 @@ def _calculate_rows(
                     break
                 eligible_rows.append(row)
             else:
-                _zero_targets(sheet, row)
+                _zero_targets(sheet, row, result_columns)
                 stats.unmatched_rows += 1
 
         if invalid_reason:
             stats.exceptional_orders += 1
             stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
             for row in rows:
-                _zero_targets(sheet, row)
+                _zero_targets(sheet, row, result_columns)
             if order_progress:
                 order_progress(order_index, total_orders)
             continue
@@ -854,7 +1011,7 @@ def _calculate_rows(
             stats.exceptional_orders += 1
             stats.warnings.append(f"订单 {display_order}：{invalid_reason}，拆分列已填 0。")
             for row in rows:
-                _zero_targets(sheet, row)
+                _zero_targets(sheet, row, result_columns)
             if order_progress:
                 order_progress(order_index, total_orders)
             continue
@@ -876,7 +1033,7 @@ def _calculate_rows(
             weighted_rows = list(row_weights)
             for row in eligible_rows:
                 if row not in row_weights:
-                    _zero_targets(sheet, row)
+                    _zero_targets(sheet, row, result_columns)
                     continue
                 ad = (
                     target_total - allocated
@@ -888,11 +1045,15 @@ def _calculate_rows(
                 aa = ratio_data.prices.get(
                     _code(sheet.cell(row, item_col).value), 0.0
                 )
-                sheet.cell(row, 27, aa)
-                sheet.cell(row, 28, ad / target_total / quantity if target_total else 0.0)
-                sheet.cell(row, 29, ad / quantity)
-                sheet.cell(row, 30, ad)
-                sheet.cell(row, 36, ad)
+                sheet.cell(row, result_columns.bundle_price, aa)
+                sheet.cell(
+                    row,
+                    result_columns.ratio,
+                    ad / target_total / quantity if target_total else 0.0,
+                )
+                sheet.cell(row, result_columns.split_unit_price, ad / quantity)
+                sheet.cell(row, result_columns.split_amount, ad)
+                sheet.cell(row, result_columns.allocated_amount, ad)
         else:
             allocation_groups: OrderedDict[str, list[int]] = OrderedDict()
             parents: dict[int, str] = {}
@@ -1003,15 +1164,15 @@ def _calculate_rows(
                         if use_ratio and entries[row] is not None
                         else unit_prices[row]
                     )
-                    sheet.cell(row, 27, aa)
+                    sheet.cell(row, result_columns.bundle_price, aa)
                     sheet.cell(
                         row,
-                        28,
+                        result_columns.ratio,
                         ad / target_total / quantity if target_total else 0.0,
                     )
-                    sheet.cell(row, 29, ad / quantity)
-                    sheet.cell(row, 30, ad)
-                    sheet.cell(row, 36, ad)
+                    sheet.cell(row, result_columns.split_unit_price, ad / quantity)
+                    sheet.cell(row, result_columns.split_amount, ad)
+                    sheet.cell(row, result_columns.allocated_amount, ad)
 
         if order_progress:
             order_progress(order_index, total_orders)
@@ -1021,7 +1182,7 @@ def _calculate_rows(
         web_order = _text(sheet.cell(row, web_order_col).value)
         if web_order:
             web_targets[web_order] = web_targets.get(web_order, 0.0) + float(
-                sheet.cell(row, 30).value or 0.0
+                sheet.cell(row, result_columns.split_amount).value or 0.0
             )
 
     return stats, web_targets
@@ -1064,17 +1225,22 @@ def process_workbooks(
         raise SplitterError(f"无法打开销售单：{exc}") from exc
 
     try:
-        source_sheet, header_row = _find_sheet(workbook, SALES_HEADERS)
+        source_sheet, header_row = _find_sheet(workbook, SALES_REQUIRED_HEADERS)
         if source_sheet is None:
             raise SplitterError("销售单中未找到包含完整销售字段的明细工作表。")
         _freeze_cached_amounts(workbook, cached_workbook)
         report(45, f"复制销售明细表“{source_sheet.title}”")
-        result_sheet = _prepare_result_sheet(workbook, source_sheet, header_row)
+        result_sheet, layout = _prepare_result_sheet(
+            workbook,
+            source_sheet,
+            header_row,
+        )
         order_amounts = _load_cached_order_amounts(cached_workbook)
         report(60, "按订单计算拆分单价")
         stats, web_targets = _calculate_rows(
             result_sheet,
             header_row,
+            layout,
             ratio_data,
             order_amounts,
             order_progress=lambda done, total: report(
@@ -1082,8 +1248,14 @@ def process_workbooks(
                 f"正在拆分订单 {done}/{total}",
             ),
         )
-        _write_result_formulas(result_sheet, header_row)
-        _prepare_summary_sheet(workbook, result_sheet, header_row, web_targets)
+        _write_result_formulas(result_sheet, header_row, layout)
+        _prepare_summary_sheet(
+            workbook,
+            result_sheet,
+            header_row,
+            web_targets,
+            layout,
+        )
         _enable_formula_recalculation(workbook)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
