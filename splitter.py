@@ -112,6 +112,7 @@ class ResultColumns:
     ratio: int
     split_unit_price: int
     split_amount: int
+    source_unit_price: int
     fee: int
     final_amount: int
     allocated_amount: int
@@ -122,6 +123,7 @@ class ResultColumns:
             self.ratio,
             self.split_unit_price,
             self.split_amount,
+            self.source_unit_price,
             self.fee,
             self.final_amount,
             self.allocated_amount,
@@ -168,7 +170,7 @@ RATIO_SCHEMAS = (
     ),
 )
 SPLIT_RESULT_HEADERS = ("组合装单价", "占比", "单价", "金额")
-AMOUNT_RESULT_HEADERS = ("手续费1%", "最终金额", "摊后金额")
+AMOUNT_RESULT_HEADERS = ("单价2", "手续费1%", "最终金额", "摊后金额")
 
 
 def _text(value: object) -> str:
@@ -511,6 +513,7 @@ def _copy_column_layout(
         result_columns.ratio: 15,
         result_columns.split_unit_price: 16,
         result_columns.split_amount: 16,
+        result_columns.source_unit_price: 13,
         result_columns.fee: 13,
         result_columns.final_amount: 13,
         result_columns.allocated_amount: 16,
@@ -553,6 +556,7 @@ def _style_new_columns(
             target.number_format = "0.00"
         amount_source = sheet.cell(row, sales_columns.original_amount)
         for col in (
+            result_columns.source_unit_price,
             result_columns.fee,
             result_columns.final_amount,
             result_columns.allocated_amount,
@@ -569,9 +573,10 @@ def _style_new_columns(
         result_columns.ratio: SPLIT_RESULT_HEADERS[1],
         result_columns.split_unit_price: SPLIT_RESULT_HEADERS[2],
         result_columns.split_amount: SPLIT_RESULT_HEADERS[3],
-        result_columns.fee: AMOUNT_RESULT_HEADERS[0],
-        result_columns.final_amount: AMOUNT_RESULT_HEADERS[1],
-        result_columns.allocated_amount: AMOUNT_RESULT_HEADERS[2],
+        result_columns.source_unit_price: AMOUNT_RESULT_HEADERS[0],
+        result_columns.fee: AMOUNT_RESULT_HEADERS[1],
+        result_columns.final_amount: AMOUNT_RESULT_HEADERS[2],
+        result_columns.allocated_amount: AMOUNT_RESULT_HEADERS[3],
     }
     for col, title in result_headers.items():
         cell = sheet.cell(header_row, col, title)
@@ -692,9 +697,10 @@ def _prepare_result_sheet(
         (
             source_sales.original_amount + 1,
             (
-                ("fee", AMOUNT_RESULT_HEADERS[0]),
-                ("final_amount", AMOUNT_RESULT_HEADERS[1]),
-                ("allocated_amount", AMOUNT_RESULT_HEADERS[2]),
+                ("source_unit_price", AMOUNT_RESULT_HEADERS[0]),
+                ("fee", AMOUNT_RESULT_HEADERS[1]),
+                ("final_amount", AMOUNT_RESULT_HEADERS[2]),
+                ("allocated_amount", AMOUNT_RESULT_HEADERS[3]),
             ),
         ),
     )
@@ -742,6 +748,7 @@ def _write_result_formulas(
     layout: ResultLayout,
 ) -> None:
     amount_letter = get_column_letter(layout.sales.original_amount)
+    quantity_letter = get_column_letter(layout.sales.quantity)
     receivable_letter = get_column_letter(layout.sales.receivable)
     fee_letter = get_column_letter(layout.result.fee)
     for row in range(header_row + 1, sheet.max_row + 1):
@@ -752,13 +759,18 @@ def _write_result_formulas(
             continue
         sheet.cell(
             row,
+            layout.result.source_unit_price,
+            f"={amount_letter}{row}/{quantity_letter}{row}",
+        )
+        sheet.cell(
+            row,
             layout.result.fee,
             f"=ROUND({amount_letter}{row}*1%,2)",
         )
         sheet.cell(
             row,
             layout.result.final_amount,
-            f"=ROUND({receivable_letter}{row}-{fee_letter}{row},2)",
+            f"={receivable_letter}{row}-{fee_letter}{row}",
         )
 
 
@@ -824,6 +836,25 @@ def _prepare_summary_sheet(
     summary.freeze_panes = "A2"
     if total_row > 2:
         summary.auto_filter.ref = f"A1:D{total_row - 1}"
+
+    if "汇总" in workbook.sheetnames:
+        workbook.remove(workbook["汇总"])
+    totals = workbook.create_sheet("汇总")
+    totals.append(["原金额", f"='透视表'!B{total_row}"])
+    fee_letter = get_column_letter(layout.result.fee)
+    allocated_letter = get_column_letter(layout.result.allocated_amount)
+    totals.append(["手续费", f"=SUM('拆分结果'!{fee_letter}:{fee_letter})"])
+    totals.append(["摊后金额", f"=SUM('拆分结果'!{allocated_letter}:{allocated_letter})"])
+    totals.append(["差异", "=B1-B2-B3"])
+    totals.column_dimensions["A"].width = 14
+    totals.column_dimensions["B"].width = 18
+    for row in range(1, 5):
+        totals.cell(row, 1).font = Font(
+            name="Microsoft YaHei UI",
+            size=10,
+            bold=True,
+        )
+        totals.cell(row, 2).number_format = "0.00_);[Red]\\(0.00\\)"
     return summary
 
 
@@ -943,17 +974,22 @@ def _calculate_rows(
             "unit_prices": unit_prices,
             "quantities": quantities,
             "receivable": receivables[0] if receivables else 0.0,
+            "fee": _round_two(
+                sum(_round_two(amount * 0.01) for amount in original_amounts.values())
+            ),
             "invalid_reason": invalid_reason,
         }
         for web_order in web_orders:
             web_groups.setdefault(web_order, []).append(group_key)
 
+    group_gross_targets: dict[tuple[str, str, int], float] = {}
     group_targets: dict[tuple[str, str, int], float] = {}
     for group_key, data in group_data.items():
         if data["invalid_reason"] is None:
-            receivable = float(data["receivable"])
+            receivable = _round_two(float(data["receivable"]))
+            group_gross_targets[group_key] = receivable
             group_targets[group_key] = _round_two(
-                receivable - receivable * 0.01
+                receivable - float(data["fee"])
             )
 
     external_group_targets: dict[tuple[str, str, int], float] = {}
@@ -986,7 +1022,10 @@ def _calculate_rows(
         if set(group_data[key]["web_orders"]).issubset(
             externally_covered_orders.get(key, set())
         ):
-            group_targets[key] = target
+            group_gross_targets[key] = target
+            group_targets[key] = _round_two(
+                target - float(group_data[key]["fee"])
+            )
 
     total_orders = len(groups)
     for order_index, (group_key, rows) in enumerate(groups.items(), start=1):
@@ -1253,14 +1292,52 @@ def _calculate_rows(
             order_progress(order_index, total_orders)
 
     web_targets: OrderedDict[str, float] = OrderedDict()
-    for row in range(header_row + 1, sheet.max_row + 1):
-        web_order = _text(sheet.cell(row, web_order_col).value)
-        if web_order:
-            web_targets[web_order] = _round_two(
-                web_targets.get(web_order, 0.0)
-                + float(
-                    sheet.cell(row, result_columns.split_amount).value or 0.0
+    for group_key, data in group_data.items():
+        if group_key not in group_gross_targets:
+            continue
+        web_orders = list(data["web_orders"])
+        if not web_orders:
+            continue
+        gross_target = group_gross_targets[group_key]
+        if len(web_orders) == 1:
+            web_targets[web_orders[0]] = _round_two(
+                web_targets.get(web_orders[0], 0.0) + gross_target
+            )
+            continue
+
+        rows_by_web: OrderedDict[str, list[int]] = OrderedDict(
+            (order, []) for order in web_orders
+        )
+        for row in data["rows"]:
+            order = _text(sheet.cell(row, web_order_col).value)
+            if order in rows_by_web:
+                rows_by_web[order].append(row)
+        weights = [
+            abs(
+                sum(
+                    float(
+                        sheet.cell(row, result_columns.split_amount).value or 0.0
+                    )
+                    for row in rows_by_web[order]
                 )
+            )
+            for order in web_orders
+        ]
+        if sum(weights) < 1e-15:
+            weights = [
+                sum(abs(data["original_amounts"][row]) for row in rows_by_web[order])
+                for order in web_orders
+            ]
+        if sum(weights) < 1e-15:
+            weights = [
+                sum(abs(data["quantities"][row]) for row in rows_by_web[order])
+                for order in web_orders
+            ]
+        if sum(weights) < 1e-15:
+            weights = [1.0] * len(web_orders)
+        for order, amount in zip(web_orders, _allocate_two(gross_target, weights)):
+            web_targets[order] = _round_two(
+                web_targets.get(order, 0.0) + amount
             )
 
     return stats, web_targets
