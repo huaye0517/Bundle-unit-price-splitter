@@ -1015,6 +1015,133 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(result["AD3"].value, 21)
             self.assertEqual(result["AK3"].value, 21)
 
+    def test_no_fee_mode_uses_receivable_and_writes_only_five_result_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+
+            process_workbooks(ratio, sales, output, charge_fee=False)
+
+            result_book = load_workbook(output, data_only=False)
+            result = result_book["拆分结果"]
+            headers = [
+                result.cell(1, column).value
+                for column in range(1, result.max_column + 1)
+            ]
+            self.assertEqual(result.max_column, len(SALES_HEADERS) + 5)
+            self.assertNotIn("单价2", headers)
+            self.assertNotIn("手续费1%", headers)
+            self.assertNotIn("最终金额", headers)
+            bundle_index = headers.index("组合装单价")
+            self.assertEqual(
+                headers[bundle_index:bundle_index + 4],
+                ["组合装单价", "占比", "单价", "金额"],
+            )
+            self.assertEqual(headers.count("单价"), 2)
+            self.assertEqual(headers.count("金额"), 2)
+            self.assertEqual(headers.count("摊后金额"), 1)
+            split_amount_col = bundle_index + 4
+            allocated_col = headers.index("摊后金额") + 1
+            self.assertAlmostEqual(
+                sum(result.cell(row, split_amount_col).value or 0 for row in range(2, 5)),
+                200,
+                places=8,
+            )
+            self.assertAlmostEqual(
+                sum(result.cell(row, allocated_col).value or 0 for row in range(2, 5)),
+                200,
+                places=8,
+            )
+            summary = result_book["透视表"]
+            self.assertEqual(summary["B1"].value, "应收合计")
+            self.assertEqual(summary["B2"].value, 200)
+            self.assertEqual(summary["C2"].value, 200)
+            totals = result_book["汇总"]
+            self.assertEqual(totals.max_row, 3)
+            self.assertEqual([totals.cell(row, 1).value for row in range(1, 4)], ["应收合计", "摊后金额", "差异"])
+            result_book.close()
+
+    def test_no_fee_mode_ignores_external_order_amount(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            make_sales(sales)
+            add_order_amounts(sales, [("WEB-1", 50)])
+
+            process_workbooks(ratio, sales, output, charge_fee=False)
+
+            result_book = load_workbook(output, data_only=False)
+            summary = result_book["透视表"]
+            self.assertEqual(summary["B2"].value, 200)
+            self.assertEqual(summary["C2"].value, 200)
+            result_book.close()
+
+    def test_no_fee_summary_sums_web_order_across_logistics_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for tracking, receivable in (("TRACKING-A", 60), ("TRACKING-B", 40)):
+                row = [""] * len(SALES_HEADERS)
+                row[1] = tracking
+                row[9] = tracking
+                row[10] = "WEB-SHARED"
+                row[13] = receivable
+                row[21] = "SKU1"
+                row[24] = 1
+                row[25] = receivable
+                row[28] = receivable
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            process_workbooks(ratio, sales, output, charge_fee=False)
+
+            result_book = load_workbook(output, data_only=False)
+            summary = result_book["透视表"]
+            self.assertEqual(summary["A2"].value, "WEB-SHARED")
+            self.assertEqual(summary["B2"].value, 100)
+            self.assertEqual(summary["C2"].value, 100)
+            result_book.close()
+
+    def test_no_fee_shared_logistics_allocates_receivable_once_across_web_orders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for web_order in ("WEB-A", "WEB-B"):
+                row = [""] * len(SALES_HEADERS)
+                row[1] = "ORDER-SHARED"
+                row[9] = "TRACKING-SHARED"
+                row[10] = web_order
+                row[13] = 100
+                row[21] = "SKU1"
+                row[24] = 1
+                row[25] = 50
+                row[28] = 50
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            process_workbooks(ratio, sales, output, charge_fee=False)
+
+            result_book = load_workbook(output, data_only=False)
+            summary = result_book["透视表"]
+            self.assertEqual([summary["B2"].value, summary["B3"].value], [50, 50])
+            self.assertEqual([summary["C2"].value, summary["C3"].value], [50, 50])
+            result_book.close()
+
     def test_source_files_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

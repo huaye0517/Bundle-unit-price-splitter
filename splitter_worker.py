@@ -27,7 +27,16 @@ def main() -> int:
             print(f"source_rows={stats.source_rows}")
             return 0
 
-        if len(sys.argv) != 4:
+        charge_fee = True
+        arguments = sys.argv[1:]
+        if len(arguments) == 5 and arguments[:2] in (
+            ["--fee-mode", "fee"],
+            ["--fee-mode", "no-fee"],
+        ):
+            charge_fee = arguments[1] == "fee"
+            arguments = arguments[2:]
+
+        if len(arguments) != 3:
             print("status=error")
             print("message_b64=" + encoded("内部调用参数不完整。"))
             return 2
@@ -35,7 +44,13 @@ def main() -> int:
         def progress(percent: int, message: str) -> None:
             print(f"progress={percent}|{encoded(message)}", flush=True)
 
-        stats = process_workbooks(sys.argv[1], sys.argv[2], sys.argv[3], progress=progress)
+        stats = process_workbooks(
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            progress=progress,
+            charge_fee=charge_fee,
+        )
         print("status=ok")
         print(f"orders={stats.orders}")
         print(f"rows={stats.rows}")

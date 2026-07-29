@@ -50,6 +50,8 @@ internal sealed class SplitterForm : Form
     private readonly Label balanceLabel;
     private readonly RadioButton appendRatioRadio;
     private readonly RadioButton replaceRatioRadio;
+    private readonly RadioButton feeModeRadio;
+    private readonly RadioButton noFeeModeRadio;
     private readonly Button ratioUpdateButton;
     private readonly ProgressBar progressBar;
     private readonly Button generateButton;
@@ -79,7 +81,7 @@ internal sealed class SplitterForm : Form
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 136));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 146));
         content.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
@@ -94,8 +96,12 @@ internal sealed class SplitterForm : Form
         replaceRatioRadio = MakeRadio("覆盖", false);
         ratioUpdateButton = MakeButton("选择更新文件", false, ChooseRatioUpdate);
         content.Controls.Add(MakeRatioDataCard(), 0, 3);
+        feeModeRadio = MakeRadio("有手续费", true);
+        noFeeModeRadio = MakeRadio("无手续费", false);
+        feeModeRadio.CheckedChanged += FeeModeChanged;
+        noFeeModeRadio.CheckedChanged += FeeModeChanged;
         salesPathLabel = MakePathLabel("尚未选择文件 · 也可将 .xlsx 拖到这里");
-        var salesCard = MakeFileCard("销售单原表", "拖入不同列布局的销售单，自动按列头名匹配", salesPathLabel, ChooseSales);
+        var salesCard = MakeSalesFileCard();
         EnableExcelDrop(salesCard, DropSales);
         content.Controls.Add(salesCard, 0, 5);
 
@@ -177,17 +183,24 @@ internal sealed class SplitterForm : Form
         fileToolTip.SetToolTip(label, path);
     }
 
-    private Panel MakeFileCard(string title, string hint, Label pathLabel, EventHandler click)
+    private Panel MakeSalesFileCard()
     {
-        var panel = new Panel { Dock = DockStyle.Fill, BackColor = Surface, Padding = new Padding(20, 14, 20, 14) };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Surface, ColumnCount = 2, RowCount = 3 };
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = Surface, Padding = new Padding(20, 12, 20, 12) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Surface, ColumnCount = 2, RowCount = 4 };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 27)); grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 27)); grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        var titleLabel = MakeLabel(title, new Font("Microsoft YaHei UI", 12F, FontStyle.Bold), Ink); titleLabel.BackColor = Surface;
-        var hintLabel = MakeLabel(hint, BodyFont, Muted); hintLabel.BackColor = Surface;
-        var button = MakeButton("选择文件", false, click); button.Dock = DockStyle.Fill; button.Margin = new Padding(10, 4, 0, 4);
-        grid.Controls.Add(titleLabel, 0, 0); grid.Controls.Add(hintLabel, 0, 1); grid.Controls.Add(pathLabel, 0, 2); grid.Controls.Add(button, 1, 0); grid.SetRowSpan(button, 3);
-        panel.Controls.Add(grid); return panel;
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 27)); grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 29)); grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        var titleLabel = MakeLabel("销售单原表", new Font("Microsoft YaHei UI", 12F, FontStyle.Bold), Ink); titleLabel.BackColor = Surface;
+        var hintLabel = MakeLabel("选择拆分模式后上传销售单；列头会自动识别", BodyFont, Muted); hintLabel.BackColor = Surface;
+        var modes = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Surface, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = new Padding(0) };
+        var modeLabel = MakeLabel("拆分模式：", new Font("Microsoft YaHei UI", 9F, FontStyle.Bold), Muted);
+        modeLabel.AutoSize = true; modeLabel.Dock = DockStyle.None; modeLabel.Margin = new Padding(0, 5, 8, 0);
+        modes.Controls.Add(modeLabel); modes.Controls.Add(feeModeRadio); modes.Controls.Add(noFeeModeRadio);
+        var button = MakeButton("选择文件", false, ChooseSales); button.Dock = DockStyle.Fill; button.Margin = new Padding(10, 4, 0, 4);
+        grid.Controls.Add(titleLabel, 0, 0); grid.Controls.Add(hintLabel, 0, 1); grid.Controls.Add(modes, 0, 2); grid.Controls.Add(salesPathLabel, 0, 3);
+        grid.Controls.Add(button, 1, 0); grid.SetRowSpan(button, 4);
+        panel.Controls.Add(grid);
+        return panel;
     }
 
     private Panel MakeRatioDataCard()
@@ -272,6 +285,12 @@ internal sealed class SplitterForm : Form
         UpdateReady();
     }
 
+    private void FeeModeChanged(object sender, EventArgs e)
+    {
+        if (!feeModeRadio.Checked && !noFeeModeRadio.Checked) return;
+        UpdateReady();
+    }
+
     private async Task ImportRatioFile(string path)
     {
         string mode = replaceRatioRadio.Checked ? "replace" : "append";
@@ -327,8 +346,9 @@ internal sealed class SplitterForm : Form
     private void UpdateReady()
     {
         if (!string.IsNullOrEmpty(salesPath)) {
-            statusLabel.Text = "销售单已就绪";
-            balanceLabel.Text = "准备完成 · 点击“一键拆分并生成 Excel”";
+            string mode = noFeeModeRadio.Checked ? "无手续费" : "有手续费";
+            statusLabel.Text = "销售单已就绪 · " + mode;
+            balanceLabel.Text = "准备完成 · " + mode + " · 点击“一键拆分并生成 Excel”";
         } else {
             statusLabel.Text = "基础库已内置，拖入销售单后开始拆分";
         }
@@ -338,7 +358,8 @@ internal sealed class SplitterForm : Form
     {
         if (string.IsNullOrEmpty(salesPath)) { MessageBox.Show("请先选择或拖入销售单原表。", "还缺销售单", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         generateButton.Enabled = false; progressBar.Style = ProgressBarStyle.Continuous; progressBar.Value = 0;
-        statusLabel.Text = "正在按列头识别数据并计算"; balanceLabel.Text = "正在核对 · 应收合计计算中  拆分计算中  差额计算中";
+        string mode = noFeeModeRadio.Checked ? "无手续费" : "有手续费";
+        statusLabel.Text = "正在按列头识别数据并计算 · " + mode; balanceLabel.Text = "正在核对 · 应收合计计算中  拆分计算中  差额计算中";
         bool succeeded = false;
         try {
             var result = await Task.Run(() => RunWorker(UpdateProgress));
@@ -349,7 +370,7 @@ internal sealed class SplitterForm : Form
             balanceLabel.Text = exceptional == 0 ? string.Format("核对通过 · 销售单组 {0}  匹配 {1}  普通商品 {2}", orders, matched, unmatched) : string.Format("有 {0} 个异常订单 · 其拆分列已填 0", exceptional);
             progressBar.Value = 100;
             succeeded = true;
-            var message = string.Format("结果已保存：\n{0}\n\n销售单组：{1}\n匹配行：{2}\n未匹配普通商品：{3}\n异常订单：{4}\n\n是否打开结果所在文件夹？", outputPath, orders, matched, unmatched, exceptional);
+            var message = string.Format("结果已保存：\n{0}\n\n拆分模式：{1}\n销售单组：{2}\n匹配行：{3}\n未匹配普通商品：{4}\n异常订单：{5}\n\n是否打开结果所在文件夹？", outputPath, mode, orders, matched, unmatched, exceptional);
             if (MessageBox.Show(message, "拆分完成", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) Process.Start("explorer.exe", "/select,\"" + outputPath + "\"");
         } catch (Exception ex) { progressBar.Value = 0; balanceLabel.Text = "核对未通过 · 未生成结果文件"; statusLabel.Text = "生成失败，请按提示检查文件"; MessageBox.Show(ex.Message, "无法生成拆分表", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { if (!succeeded) progressBar.Value = 0; generateButton.Enabled = true; }
@@ -366,7 +387,8 @@ internal sealed class SplitterForm : Form
 
     private Dictionary<string, string> RunWorker(Action<int, string> onProgress)
     {
-        return RunWorkerCommand(Quote(ratioPath) + " " + Quote(salesPath) + " " + Quote(outputPath), onProgress);
+        string mode = noFeeModeRadio.Checked ? "no-fee" : "fee";
+        return RunWorkerCommand("--fee-mode " + mode + " " + Quote(ratioPath) + " " + Quote(salesPath) + " " + Quote(outputPath), onProgress);
     }
 
     private Dictionary<string, string> RunWorkerCommand(string arguments, Action<int, string> onProgress)

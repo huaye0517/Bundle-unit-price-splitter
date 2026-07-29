@@ -112,21 +112,25 @@ class ResultColumns:
     ratio: int
     split_unit_price: int
     split_amount: int
-    source_unit_price: int
-    fee: int
-    final_amount: int
     allocated_amount: int
+    source_unit_price: int | None = None
+    fee: int | None = None
+    final_amount: int | None = None
 
     def all(self) -> tuple[int, ...]:
-        return (
-            self.bundle_price,
-            self.ratio,
-            self.split_unit_price,
-            self.split_amount,
-            self.source_unit_price,
-            self.fee,
-            self.final_amount,
-            self.allocated_amount,
+        return tuple(
+            column
+            for column in (
+                self.bundle_price,
+                self.ratio,
+                self.split_unit_price,
+                self.split_amount,
+                self.allocated_amount,
+                self.source_unit_price,
+                self.fee,
+                self.final_amount,
+            )
+            if column is not None
         )
 
 
@@ -520,12 +524,14 @@ def _copy_column_layout(
         result_columns.ratio: 15,
         result_columns.split_unit_price: 16,
         result_columns.split_amount: 16,
+        result_columns.allocated_amount: 16,
         result_columns.source_unit_price: 13,
         result_columns.fee: 13,
         result_columns.final_amount: 13,
-        result_columns.allocated_amount: 16,
     }
     for col, width in widths.items():
+        if col is None:
+            continue
         sheet.column_dimensions[get_column_letter(col)].width = width
 
 
@@ -563,11 +569,13 @@ def _style_new_columns(
             target.number_format = "0.00"
         amount_source = sheet.cell(row, sales_columns.original_amount)
         for col in (
+            result_columns.allocated_amount,
             result_columns.source_unit_price,
             result_columns.fee,
             result_columns.final_amount,
-            result_columns.allocated_amount,
         ):
+            if col is None:
+                continue
             target = sheet.cell(row, col)
             if amount_source.has_style:
                 target._style = copy(amount_source._style)
@@ -580,12 +588,14 @@ def _style_new_columns(
         result_columns.ratio: SPLIT_RESULT_HEADERS[1],
         result_columns.split_unit_price: SPLIT_RESULT_HEADERS[2],
         result_columns.split_amount: SPLIT_RESULT_HEADERS[3],
+        result_columns.allocated_amount: AMOUNT_RESULT_HEADERS[3],
         result_columns.source_unit_price: AMOUNT_RESULT_HEADERS[0],
         result_columns.fee: AMOUNT_RESULT_HEADERS[1],
         result_columns.final_amount: AMOUNT_RESULT_HEADERS[2],
-        result_columns.allocated_amount: AMOUNT_RESULT_HEADERS[3],
     }
     for col, title in result_headers.items():
+        if col is None:
+            continue
         cell = sheet.cell(header_row, col, title)
         cell.fill = header_fill
         cell.font = Font(name="Microsoft YaHei UI", size=10, bold=True, color="FFFFFF")
@@ -675,6 +685,7 @@ def _prepare_result_sheet(
     workbook,
     source_sheet,
     header_row: int,
+    charge_fee: bool,
 ) -> tuple[object, ResultLayout]:
     old_layout = _capture_column_layout(source_sheet)
     source_sales = _sales_columns(source_sheet, header_row)
@@ -691,6 +702,16 @@ def _prepare_result_sheet(
         column: column for column in range(1, source_sheet.max_column + 1)
     }
     result_positions: dict[str, int] = {}
+    amount_columns = (
+        (
+            ("source_unit_price", AMOUNT_RESULT_HEADERS[0]),
+            ("fee", AMOUNT_RESULT_HEADERS[1]),
+            ("final_amount", AMOUNT_RESULT_HEADERS[2]),
+            ("allocated_amount", AMOUNT_RESULT_HEADERS[3]),
+        )
+        if charge_fee
+        else (("allocated_amount", AMOUNT_RESULT_HEADERS[3]),)
+    )
     insertions = (
         (
             source_sales.unit_price + 1,
@@ -703,12 +724,7 @@ def _prepare_result_sheet(
         ),
         (
             source_sales.original_amount + 1,
-            (
-                ("source_unit_price", AMOUNT_RESULT_HEADERS[0]),
-                ("fee", AMOUNT_RESULT_HEADERS[1]),
-                ("final_amount", AMOUNT_RESULT_HEADERS[2]),
-                ("allocated_amount", AMOUNT_RESULT_HEADERS[3]),
-            ),
+            amount_columns,
         ),
     )
     for insert_at, columns in sorted(insertions, reverse=True):
@@ -754,6 +770,12 @@ def _write_result_formulas(
     header_row: int,
     layout: ResultLayout,
 ) -> None:
+    if (
+        layout.result.source_unit_price is None
+        or layout.result.fee is None
+        or layout.result.final_amount is None
+    ):
+        return
     amount_letter = get_column_letter(layout.sales.original_amount)
     quantity_letter = get_column_letter(layout.sales.quantity)
     receivable_letter = get_column_letter(layout.sales.receivable)
@@ -786,13 +808,18 @@ def _prepare_summary_sheet(
     result_sheet,
     header_row: int,
     layout: ResultLayout,
+    web_targets: OrderedDict[str, float],
+    charge_fee: bool,
 ):
     if "透视表" in workbook.sheetnames:
         workbook.remove(workbook["透视表"])
     summary = workbook.create_sheet("透视表")
-    summary.append(["网店订单号", "平均值项:最终金额", "求和项:摊后金额", "差异"])
+    target_header = "平均值项:最终金额" if charge_fee else "应收合计"
+    summary.append(["网店订单号", target_header, "求和项:摊后金额", "差异"])
 
-    final_totals: OrderedDict[str, float] = OrderedDict()
+    final_totals: OrderedDict[str, float] = (
+        OrderedDict() if charge_fee else OrderedDict(web_targets)
+    )
     allocated_totals: OrderedDict[str, float] = OrderedDict()
     for row in range(header_row + 1, result_sheet.max_row + 1):
         order = _text(result_sheet.cell(row, layout.sales.web_order_number).value)
@@ -800,18 +827,19 @@ def _prepare_summary_sheet(
             continue
         final_totals.setdefault(order, 0.0)
         allocated_totals.setdefault(order, 0.0)
-        try:
-            original_amount = _number(
-                result_sheet.cell(row, layout.sales.original_amount).value or 0,
-                f"第 {row} 行原金额",
-            )
-            final_totals[order] = _round_two(
-                final_totals[order]
-                + original_amount
-                - _round_two(original_amount * 0.01)
-            )
-        except ValueError:
-            pass
+        if charge_fee:
+            try:
+                original_amount = _number(
+                    result_sheet.cell(row, layout.sales.original_amount).value or 0,
+                    f"第 {row} 行原金额",
+                )
+                final_totals[order] = _round_two(
+                    final_totals[order]
+                    + original_amount
+                    - _round_two(original_amount * 0.01)
+                )
+            except ValueError:
+                pass
         allocated = result_sheet.cell(
             row, layout.result.allocated_amount
         ).value
@@ -863,20 +891,27 @@ def _prepare_summary_sheet(
     if "汇总" in workbook.sheetnames:
         workbook.remove(workbook["汇总"])
     totals = workbook.create_sheet("汇总")
-    original_amount_letter = get_column_letter(layout.sales.original_amount)
     allocated_letter = get_column_letter(layout.result.allocated_amount)
-    fee_letter = get_column_letter(layout.result.fee)
-    totals.append(
-        ["最终金额", f"=SUM('拆分结果'!{original_amount_letter}:{original_amount_letter})"]
-    )
-    totals.append(
-        ["摊后金额", f"=SUM('拆分结果'!{allocated_letter}:{allocated_letter})"]
-    )
-    totals.append(["手续费", f"=SUM('拆分结果'!{fee_letter}:{fee_letter})"])
-    totals.append(["差异", "=B1-B2-B3"])
+    if charge_fee:
+        original_amount_letter = get_column_letter(layout.sales.original_amount)
+        fee_letter = get_column_letter(layout.result.fee)
+        totals.append(
+            ["最终金额", f"=SUM('拆分结果'!{original_amount_letter}:{original_amount_letter})"]
+        )
+        totals.append(
+            ["摊后金额", f"=SUM('拆分结果'!{allocated_letter}:{allocated_letter})"]
+        )
+        totals.append(["手续费", f"=SUM('拆分结果'!{fee_letter}:{fee_letter})"])
+        totals.append(["差异", "=B1-B2-B3"])
+    else:
+        totals.append(["应收合计", f"='透视表'!B{total_row}"])
+        totals.append(
+            ["摊后金额", f"=SUM('拆分结果'!{allocated_letter}:{allocated_letter})"]
+        )
+        totals.append(["差异", "=B1-B2"])
     totals.column_dimensions["A"].width = 14
     totals.column_dimensions["B"].width = 18
-    for row in range(1, 5):
+    for row in range(1, totals.max_row + 1):
         totals.cell(row, 1).font = Font(
             name="Microsoft YaHei UI",
             size=10,
@@ -905,6 +940,7 @@ def _calculate_rows(
     layout: ResultLayout,
     ratio_data: RatioData,
     order_amounts: dict[str, float],
+    charge_fee: bool = True,
     order_progress: OrderProgressCallback | None = None,
 ) -> tuple[SplitStats, OrderedDict[str, float]]:
     sales_columns = layout.sales
@@ -1017,7 +1053,7 @@ def _calculate_rows(
             receivable = _round_two(float(data["receivable"]))
             group_gross_targets[group_key] = receivable
             group_targets[group_key] = _round_two(
-                receivable - float(data["fee"])
+                receivable - float(data["fee"]) if charge_fee else receivable
             )
 
     external_group_targets: dict[tuple[str, str, int], float] = {}
@@ -1052,7 +1088,7 @@ def _calculate_rows(
         ):
             group_gross_targets[key] = target
             group_targets[key] = _round_two(
-                target - float(group_data[key]["fee"])
+                target - float(group_data[key]["fee"]) if charge_fee else target
             )
 
     total_orders = len(groups)
@@ -1376,6 +1412,7 @@ def process_workbooks(
     sales_path: str | Path,
     output_path: str | Path,
     progress: ProgressCallback | None = None,
+    charge_fee: bool = True,
 ) -> SplitStats:
     """Generate a numeric result workbook that mirrors the reference formulas."""
 
@@ -1417,15 +1454,20 @@ def process_workbooks(
             workbook,
             source_sheet,
             header_row,
+            charge_fee,
         )
-        order_amounts = _load_cached_order_amounts(cached_workbook)
-        report(60, "按订单计算拆分单价")
-        stats, _web_targets = _calculate_rows(
+        order_amounts = (
+            _load_cached_order_amounts(cached_workbook) if charge_fee else {}
+        )
+        mode_label = "扣除手续费后" if charge_fee else "按应收合计"
+        report(60, f"{mode_label}计算拆分单价")
+        stats, web_targets = _calculate_rows(
             result_sheet,
             header_row,
             layout,
             ratio_data,
             order_amounts,
+            charge_fee=charge_fee,
             order_progress=lambda done, total: report(
                 60 + int((done / total) * 28) if total else 88,
                 f"正在拆分订单 {done}/{total}",
@@ -1437,6 +1479,8 @@ def process_workbooks(
             result_sheet,
             header_row,
             layout,
+            web_targets,
+            charge_fee,
         )
         _enable_formula_recalculation(workbook)
 
