@@ -177,6 +177,10 @@ def _text(value: object) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _header_name(value: object) -> str:
+    return re.sub(r"\s+", "", _text(value).replace("\u3000", ""))
+
+
 def _code(value: object) -> str:
     return _text(value).upper()
 
@@ -204,7 +208,10 @@ def _find_sheet(workbook, required: set[str], preferred: str | None = None):
     matches = []
     for sheet in candidates:
         for row_number in range(1, min(sheet.max_row, 5) + 1):
-            headers = {_text(sheet.cell(row_number, col).value) for col in range(1, sheet.max_column + 1)}
+            headers = {
+                _header_name(sheet.cell(row_number, col).value)
+                for col in range(1, sheet.max_column + 1)
+            }
             if required.issubset(headers):
                 matches.append((sheet, row_number))
                 break
@@ -216,7 +223,7 @@ def _find_sheet(workbook, required: set[str], preferred: str | None = None):
 def _header_map(sheet, header_row: int) -> dict[str, int]:
     result: dict[str, int] = {}
     for column in range(1, sheet.max_column + 1):
-        name = _text(sheet.cell(header_row, column).value)
+        name = _header_name(sheet.cell(header_row, column).value)
         if name and name not in result:
             result[name] = column
     return result
@@ -230,7 +237,7 @@ def _sales_columns(sheet, header_row: int) -> SalesColumns:
     amount_columns = [
         column
         for column in range(1, sheet.max_column + 1)
-        if _text(sheet.cell(header_row, column).value) == "金额"
+        if _header_name(sheet.cell(header_row, column).value) == "金额"
     ]
     return SalesColumns(
         order_number=headers["订单编号"],

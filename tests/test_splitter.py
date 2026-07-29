@@ -842,6 +842,87 @@ class SplitterTests(unittest.TestCase):
             self.assertAlmostEqual(summary["C2"].value, 99, places=12)
             result_book.close()
 
+    def test_three_colleague_column_layouts_are_matched_by_header_name(self):
+        layouts = (
+            [
+                "货品数量",
+                "订单编号",
+                "网店订单号",
+                "物流单号",
+                "应收合计",
+                "金额",
+                "单价",
+                "货品编号",
+                "数量",
+                "备注",
+            ],
+            [
+                "订单编号",
+                "物流单号",
+                "网店订单号",
+                "应收合计",
+                "货品编号",
+                "数量",
+                "单价",
+                "备注",
+                "金额",
+            ],
+            [
+                "备注",
+                "金额",
+                "数量",
+                "货品编号",
+                "应收合计",
+                "网店\n订单号",
+                "单价",
+                "物流单号",
+                "订单编号",
+            ],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio = root / "ratio.xlsx"
+            make_ratio(ratio)
+            for index, headers in enumerate(layouts, start=1):
+                with self.subTest(layout=index):
+                    sales = root / f"sales-{index}.xlsx"
+                    output = root / f"output-{index}.xlsx"
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.title = "sheetTitle"
+                    ws.append(headers)
+                    values = {
+                        "订单编号": "ORDER-1",
+                        "物流单号": "LOG-1",
+                        "网店订单号": "WEB-1",
+                        "应收合计": 100,
+                        "货品编号": "SKU1",
+                        "数量": 1,
+                        "单价": 100,
+                        "金额": 100,
+                        "备注": "",
+                        "货品数量": 1,
+                    }
+                    ws.append(
+                        [
+                            values.get(header.replace("\n", "").strip(), "")
+                            for header in headers
+                        ]
+                    )
+                    wb.save(sales)
+                    wb.close()
+
+                    stats = process_workbooks(ratio, sales, output)
+
+                    self.assertEqual(stats.orders, 1)
+                    self.assertEqual(stats.exceptional_orders, 0)
+                    result_book = load_workbook(output, data_only=False)
+                    summary = result_book["透视表"]
+                    self.assertEqual(summary["A2"].value, "WEB-1")
+                    self.assertEqual(summary["B2"].value, 99)
+                    self.assertEqual(summary["C2"].value, 99)
+                    result_book.close()
+
     def test_zero_receivable_order_is_valid_without_source_amount(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
