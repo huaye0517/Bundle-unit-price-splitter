@@ -104,6 +104,7 @@ class SalesColumns:
     unit_price: int
     original_amount: int
     note: int
+    marker: int | None = None
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,7 @@ def _sales_columns(sheet, header_row: int) -> SalesColumns:
         unit_price=headers["单价"],
         original_amount=amount_columns[-1],
         note=headers["备注"],
+        marker=headers.get("标记"),
     )
 
 
@@ -731,7 +733,11 @@ def _prepare_result_sheet(
         count = len(columns)
         result_sheet.insert_cols(insert_at, amount=count)
         sales_positions = {
-            name: column + count if column >= insert_at else column
+            name: (
+                column + count
+                if column is not None and column >= insert_at
+                else column
+            )
             for name, column in sales_positions.items()
         }
         source_positions = {
@@ -854,20 +860,21 @@ def _prepare_summary_sheet(
 
     for order in sorted(set(final_totals) | set(allocated_totals)):
         row = summary.max_row + 1
+        target = _round_two(final_totals.get(order, 0.0))
+        allocated = _round_two(allocated_totals.get(order, 0.0))
+        difference = _round_two(allocated - target)
         summary.cell(row, 1, order)
-        summary.cell(row, 2, _round_two(final_totals.get(order, 0.0)))
-        summary.cell(row, 3, _round_two(allocated_totals.get(order, 0.0)))
-        summary.cell(row, 4, f"=ROUND(C{row}-B{row},2)")
+        summary.cell(row, 2, target)
+        summary.cell(row, 3, allocated)
+        summary.cell(row, 4, difference)
 
     total_row = summary.max_row + 1
+    target_total = _round_two(sum(final_totals.values()))
+    allocated_total = _round_two(sum(allocated_totals.values()))
     summary.cell(total_row, 1, "总计")
-    if total_row == 2:
-        summary.cell(total_row, 2, 0.0)
-        summary.cell(total_row, 3, 0.0)
-    else:
-        summary.cell(total_row, 2, f"=ROUND(SUM(B2:B{total_row - 1}),2)")
-        summary.cell(total_row, 3, f"=ROUND(SUM(C2:C{total_row - 1}),2)")
-    summary.cell(total_row, 4, f"=ROUND(C{total_row}-B{total_row},2)")
+    summary.cell(total_row, 2, target_total)
+    summary.cell(total_row, 3, allocated_total)
+    summary.cell(total_row, 4, _round_two(allocated_total - target_total))
 
     header_fill = PatternFill("solid", fgColor="245C73")
     for cell in summary[1]:
@@ -880,6 +887,14 @@ def _prepare_summary_sheet(
         summary.cell(row, 1).number_format = "@"
         for col in range(2, 5):
             summary.cell(row, col).number_format = "0.00_);[Red]\\(0.00\\)"
+        if abs(float(summary.cell(row, 4).value or 0.0)) >= 0.005:
+            summary.cell(row, 4).fill = PatternFill("solid", fgColor="FCE8E6")
+            summary.cell(row, 4).font = Font(
+                name="Microsoft YaHei UI",
+                size=10,
+                bold=True,
+                color="C5221F",
+            )
     summary.column_dimensions["A"].width = 36
     summary.column_dimensions["B"].width = 18.25
     summary.column_dimensions["C"].width = 13
@@ -955,13 +970,18 @@ def _calculate_rows(
     note_col = sales_columns.note
     original_amount_col = sales_columns.original_amount
 
-    groups: OrderedDict[tuple[str, str, int], list[int]] = OrderedDict()
+    base_groups: OrderedDict[tuple[str, str, int], list[int]] = OrderedDict()
+    row_group_keys: dict[int, tuple[str, str, int]] = {}
+    rows_by_web_order: OrderedDict[str, list[int]] = OrderedDict()
+    split_web_orders: set[str] = set()
+    active_rows: list[int] = []
     for row in range(header_row + 1, sheet.max_row + 1):
         if all(
             sheet.cell(row, col).value is None
             for col in layout.source_columns
         ):
             continue
+        active_rows.append(row)
         logistics_number = _text(sheet.cell(row, logistics_col).value)
         order_number = _text(sheet.cell(row, order_col).value)
         web_order_number = _text(sheet.cell(row, web_order_col).value)
@@ -973,7 +993,44 @@ def _calculate_rows(
             key = ("网店订单号", web_order_number, 0)
         else:
             key = ("单行", "", row)
-        groups.setdefault(key, []).append(row)
+        row_group_keys[row] = key
+        base_groups.setdefault(key, []).append(row)
+        if web_order_number:
+            rows_by_web_order.setdefault(web_order_number, []).append(row)
+            marker = (
+                _text(sheet.cell(row, sales_columns.marker).value)
+                if sales_columns.marker is not None
+                else ""
+            )
+            if "拆分" in marker:
+                split_web_orders.add(web_order_number)
+
+    parent = {key: key for key in base_groups}
+
+    def find(key: tuple[str, str, int]) -> tuple[str, str, int]:
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(left: tuple[str, str, int], right: tuple[str, str, int]) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for web_order in split_web_orders:
+        keys = list(
+            dict.fromkeys(
+                row_group_keys[row] for row in rows_by_web_order[web_order]
+            )
+        )
+        for key in keys[1:]:
+            union(keys[0], key)
+
+    groups: OrderedDict[tuple[str, str, int], list[int]] = OrderedDict()
+    for row in active_rows:
+        groups.setdefault(find(row_group_keys[row]), []).append(row)
 
     stats = SplitStats(orders=len(groups), rows=sum(len(rows) for rows in groups.values()))
     group_data: OrderedDict[tuple[str, str, int], dict[str, object]] = OrderedDict()
@@ -1008,21 +1065,17 @@ def _calculate_rows(
             invalid_reason = str(exc)
 
         receivables: list[float] = []
+        row_receivables: dict[int, float] = {}
         if invalid_reason is None:
             try:
                 for row in rows:
                     value = sheet.cell(row, total_col).value
                     if _text(value) != "":
-                        receivables.append(_number(value, f"第 {row} 行应收合计"))
+                        receivable = _number(value, f"第 {row} 行应收合计")
+                        receivables.append(receivable)
+                        row_receivables[row] = receivable
             except ValueError as exc:
                 invalid_reason = str(exc)
-        if invalid_reason is None:
-            if not receivables:
-                invalid_reason = (
-                    "应收合计为空或公式没有缓存值，请先用 Excel/WPS 打开并保存源文件后再上传"
-                )
-            elif any(abs(value - receivables[0]) > 1e-9 for value in receivables[1:]):
-                invalid_reason = f"同一{group_key[0]}存在多个不同的应收合计"
 
         web_orders = tuple(
             dict.fromkeys(
@@ -1031,13 +1084,52 @@ def _calculate_rows(
                 if _text(sheet.cell(row, web_order_col).value)
             )
         )
+        markers = [
+            _text(sheet.cell(row, sales_columns.marker).value)
+            for row in rows
+        ] if sales_columns.marker is not None else []
+        marker_group = any(
+            "拆分" in marker or "合并" in marker
+            for marker in markers
+        )
+        receivable_by_web: OrderedDict[str, float] = OrderedDict()
+        if invalid_reason is None:
+            if not receivables:
+                invalid_reason = (
+                    "应收合计为空或公式没有缓存值，请先用 Excel/WPS 打开并保存源文件后再上传"
+                )
+            elif marker_group and web_orders:
+                for web_order in web_orders:
+                    values = [
+                        row_receivables[row]
+                        for row in rows
+                        if row in row_receivables
+                        and _text(sheet.cell(row, web_order_col).value) == web_order
+                    ]
+                    if not values:
+                        invalid_reason = f"网店订单号 {web_order} 的应收合计为空"
+                        break
+                    if any(abs(value - values[0]) > 1e-9 for value in values[1:]):
+                        invalid_reason = f"网店订单号 {web_order} 存在多个不同的应收合计"
+                        break
+                    receivable_by_web[web_order] = _round_two(values[0])
+            elif any(abs(value - receivables[0]) > 1e-9 for value in receivables[1:]):
+                invalid_reason = f"同一{group_key[0]}存在多个不同的应收合计"
+
+        group_receivable = (
+            _round_two(sum(receivable_by_web.values()))
+            if receivable_by_web
+            else (receivables[0] if receivables else 0.0)
+        )
         group_data[group_key] = {
             "rows": rows,
             "web_orders": web_orders,
             "original_amounts": original_amounts,
             "unit_prices": unit_prices,
             "quantities": quantities,
-            "receivable": receivables[0] if receivables else 0.0,
+            "receivable": group_receivable,
+            "receivable_by_web": receivable_by_web,
+            "marker_group": marker_group,
             "fee": _round_two(
                 sum(_round_two(amount * 0.01) for amount in original_amounts.values())
             ),
@@ -1352,6 +1444,14 @@ def _calculate_rows(
                     sheet.cell(row, result_columns.split_amount, ad)
                     sheet.cell(row, result_columns.allocated_amount, ad)
 
+        ratio_weights = [
+            abs(float(sheet.cell(row, result_columns.split_amount).value or 0.0))
+            for row in rows
+        ]
+        if sum(ratio_weights) >= 1e-15:
+            for row, ratio in zip(rows, _allocate_two(1.0, ratio_weights)):
+                sheet.cell(row, result_columns.ratio, ratio)
+
         if order_progress:
             order_progress(order_index, total_orders)
 
@@ -1363,6 +1463,12 @@ def _calculate_rows(
         if not web_orders:
             continue
         gross_target = group_gross_targets[group_key]
+        if data["marker_group"] and data["receivable_by_web"]:
+            for order, amount in data["receivable_by_web"].items():
+                web_targets[order] = _round_two(
+                    web_targets.get(order, 0.0) + amount
+                )
+            continue
         if len(web_orders) == 1:
             web_targets[web_orders[0]] = _round_two(
                 web_targets.get(web_orders[0], 0.0) + gross_target

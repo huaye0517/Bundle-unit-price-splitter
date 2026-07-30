@@ -144,7 +144,7 @@ class SplitterTests(unittest.TestCase):
             summary = result_book["透视表"]
             self.assertEqual(summary["B2"].value, 2.97)
             self.assertEqual(summary["C2"].value, 99.98)
-            self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
+            self.assertEqual(summary["D2"].value, 97.01)
             result_book.close()
 
     def test_missing_calculation_properties_are_initialized(self):
@@ -235,14 +235,14 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(summary["A2"].value, "PO-260629-323800286823316")
             self.assertEqual(summary["B2"].value, 185.6)
             self.assertAlmostEqual(summary["C2"].value, net_total, places=8)
-            self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
+            self.assertEqual(summary["D2"].value, 1687.5)
             self.assertEqual(
                 summary["D2"].number_format,
                 "0.00_);[Red]\\(0.00\\)",
             )
             self.assertEqual(summary["A3"].value, "总计")
-            self.assertEqual(summary["B3"].value, "=ROUND(SUM(B2:B2),2)")
-            self.assertEqual(summary["C3"].value, "=ROUND(SUM(C2:C2),2)")
+            self.assertEqual(summary["B3"].value, 185.6)
+            self.assertEqual(summary["C3"].value, net_total)
             totals = result_book["汇总"]
             self.assertEqual(totals["A1"].value, "最终金额")
             self.assertEqual(totals["B1"].value, "=SUM('拆分结果'!AG:AG)")
@@ -252,7 +252,7 @@ class SplitterTests(unittest.TestCase):
             self.assertEqual(totals["B3"].value, "=SUM('拆分结果'!AI:AI)")
             self.assertEqual(totals["A4"].value, "差异")
             self.assertEqual(totals["B4"].value, "=B1-B2-B3")
-            self.assertEqual(summary["D3"].value, "=ROUND(C3-B3,2)")
+            self.assertEqual(summary["D3"].value, 1687.5)
             self.assertEqual(len(getattr(summary, "_pivots", [])), 0)
             self.assertEqual(result_book.calculation.calcMode, "auto")
             self.assertTrue(result_book.calculation.fullCalcOnLoad)
@@ -294,8 +294,8 @@ class SplitterTests(unittest.TestCase):
             self.assertAlmostEqual(summary["C2"].value, 23.7, places=8)
             self.assertEqual(summary["B3"].value, 85.27)
             self.assertEqual(summary["C3"].value, 72.64)
-            self.assertEqual(summary["D2"].value, "=ROUND(C2-B2,2)")
-            self.assertEqual(summary["D3"].value, "=ROUND(C3-B3,2)")
+            self.assertEqual(summary["D2"].value, -5.5)
+            self.assertEqual(summary["D3"].value, -12.63)
             result.close()
 
     def test_conflicting_receivable_totals_mark_only_that_order_exceptional(self):
@@ -1140,6 +1140,134 @@ class SplitterTests(unittest.TestCase):
             summary = result_book["透视表"]
             self.assertEqual([summary["B2"].value, summary["B3"].value], [50, 50])
             self.assertEqual([summary["C2"].value, summary["C3"].value], [50, 50])
+            result_book.close()
+
+    def test_split_marker_combines_logistics_and_row_ratios_sum_to_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for tracking, code, quantity, amount in (
+                ("TRACKING-A", "SKU1", 2, 40),
+                ("TRACKING-B", "SKU2", 1, 60),
+            ):
+                row = [""] * len(SALES_HEADERS)
+                row[0] = "驳回,拆分,已成本核算"
+                row[1] = f"ORDER-{tracking}"
+                row[9] = tracking
+                row[10] = "WEB-SPLIT"
+                row[13] = 100
+                row[21] = code
+                row[24] = quantity
+                row[25] = amount / quantity
+                row[28] = amount
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output, charge_fee=False)
+
+            self.assertEqual(stats.orders, 1)
+            result_book = load_workbook(output, data_only=False)
+            result = result_book["拆分结果"]
+            self.assertEqual([result["AB2"].value, result["AB3"].value], [0.4, 0.6])
+            self.assertEqual(result["AB2"].value + result["AB3"].value, 1)
+            self.assertEqual(result["AC2"].value, 20)
+            self.assertEqual(result["AH2"].value + result["AH3"].value, 100)
+            summary = result_book["透视表"]
+            self.assertEqual([summary["B2"].value, summary["C2"].value, summary["D2"].value], [100, 100, 0])
+            result_book.close()
+
+    def test_merge_marker_sums_web_receivables_and_marks_pivot_differences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for web_order, receivable, code in (
+                ("WEB-A", 60, "SKU1"),
+                ("WEB-B", 40, "SKU2"),
+            ):
+                row = [""] * len(SALES_HEADERS)
+                row[0] = "有赠品,合并,已成本核算"
+                row[1] = "ORDER-MERGED"
+                row[9] = "TRACKING-MERGED"
+                row[10] = web_order
+                row[13] = receivable
+                row[21] = code
+                row[24] = 1
+                row[25] = 50
+                row[28] = 50
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output, charge_fee=False)
+
+            self.assertEqual(stats.orders, 1)
+            self.assertEqual(stats.exceptional_orders, 0)
+            result_book = load_workbook(output, data_only=False)
+            result = result_book["拆分结果"]
+            self.assertEqual(result["AB2"].value + result["AB3"].value, 1)
+            self.assertEqual(result["AH2"].value + result["AH3"].value, 100)
+            summary = result_book["透视表"]
+            self.assertEqual([summary["B2"].value, summary["B3"].value], [60, 40])
+            self.assertEqual([summary["C2"].value, summary["C3"].value], [40, 60])
+            self.assertEqual([summary["D2"].value, summary["D3"].value], [-20, 20])
+            self.assertEqual(summary["D2"].fill.fgColor.rgb, "00FCE8E6")
+            self.assertEqual(summary["D3"].fill.fgColor.rgb, "00FCE8E6")
+            self.assertEqual([summary["B4"].value, summary["C4"].value, summary["D4"].value], [100, 100, 0])
+            result_book.close()
+
+    def test_split_and_merge_markers_form_one_transitive_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = root / "ratio.xlsx", root / "sales.xlsx", root / "output.xlsx"
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售明细"
+            ws.append(SALES_HEADERS)
+            for marker, tracking, web_order, receivable, code in (
+                ("拆分,已成本核算", "TRACKING-A", "WEB-A", 60, "SKU1"),
+                ("拆分,合并,已成本核算", "TRACKING-B", "WEB-A", 60, "SKU2"),
+                ("合并,已成本核算", "TRACKING-B", "WEB-B", 40, "SKU1"),
+            ):
+                row = [""] * len(SALES_HEADERS)
+                row[0] = marker
+                row[1] = f"ORDER-{tracking}-{web_order}"
+                row[9] = tracking
+                row[10] = web_order
+                row[13] = receivable
+                row[21] = code
+                row[24] = 1
+                row[25] = 50
+                row[28] = 50
+                ws.append(row)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output, charge_fee=False)
+
+            self.assertEqual(stats.orders, 1)
+            self.assertEqual(stats.exceptional_orders, 0)
+            result_book = load_workbook(output, data_only=False)
+            result = result_book["拆分结果"]
+            self.assertEqual(
+                sum(result.cell(row, 28).value for row in range(2, 5)),
+                1,
+            )
+            self.assertEqual(
+                sum(result.cell(row, 34).value for row in range(2, 5)),
+                100,
+            )
             result_book.close()
 
     def test_source_files_are_not_overwritten(self):
