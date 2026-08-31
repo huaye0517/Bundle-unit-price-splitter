@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import sys
 
-from splitter import SplitterError, process_workbooks
+from splitter import SplitterError, process_workbooks, ratio_file_info, update_ratio_data
 
 
 def encoded(value: str) -> str:
@@ -11,15 +11,46 @@ def encoded(value: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("status=error")
-        print("message_b64=" + encoded("内部调用参数不完整。"))
-        return 2
     try:
+        if len(sys.argv) == 3 and sys.argv[1] == "--ratio-info":
+            unique_items, source_rows = ratio_file_info(sys.argv[2])
+            print("status=ok")
+            print(f"unique_items={unique_items}")
+            print(f"source_rows={source_rows}")
+            return 0
+
+        if len(sys.argv) == 5 and sys.argv[1] == "--update-ratio":
+            stats = update_ratio_data(sys.argv[3], sys.argv[4], sys.argv[2])
+            print("status=ok")
+            print(f"added_rows={stats.added_rows}")
+            print(f"unique_items={stats.unique_items}")
+            print(f"source_rows={stats.source_rows}")
+            return 0
+
+        charge_fee = True
+        arguments = sys.argv[1:]
+        if len(arguments) == 5 and arguments[:2] in (
+            ["--fee-mode", "fee"],
+            ["--fee-mode", "no-fee"],
+        ):
+            charge_fee = arguments[1] == "fee"
+            arguments = arguments[2:]
+
+        if len(arguments) != 3:
+            print("status=error")
+            print("message_b64=" + encoded("内部调用参数不完整。"))
+            return 2
+
         def progress(percent: int, message: str) -> None:
             print(f"progress={percent}|{encoded(message)}", flush=True)
 
-        stats = process_workbooks(sys.argv[1], sys.argv[2], sys.argv[3], progress=progress)
+        stats = process_workbooks(
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            progress=progress,
+            charge_fee=charge_fee,
+        )
         print("status=ok")
         print(f"orders={stats.orders}")
         print(f"rows={stats.rows}")

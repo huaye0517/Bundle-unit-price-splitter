@@ -17,10 +17,26 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCOD
 
 $Csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path -LiteralPath $Csc)) { throw "C# compiler not found: $Csc" }
-& $Csc /nologo /target:winexe /optimize+ /out:"outputs\BundleUnitPriceSplitter_v3.exe" `
+$LauncherBuildDir = Join-Path $env:TEMP "BundleUnitPriceSplitterBuild"
+New-Item -ItemType Directory -Path $LauncherBuildDir -Force | Out-Null
+New-Item -ItemType Directory -Path "outputs" -Force | Out-Null
+Copy-Item -LiteralPath "DesktopApp.cs" -Destination (Join-Path $LauncherBuildDir "DesktopApp.cs") -Force
+Copy-Item -LiteralPath "work\worker-dist\SplitterWorker.exe" -Destination (Join-Path $LauncherBuildDir "SplitterWorker.exe") -Force
+Copy-Item -LiteralPath "assets\DefaultRatioData.xlsx" -Destination (Join-Path $LauncherBuildDir "DefaultRatioData.xlsx") -Force
+Copy-Item -LiteralPath "assets\app-icon.ico" -Destination (Join-Path $LauncherBuildDir "app-icon.ico") -Force
+$LauncherExe = Join-Path $LauncherBuildDir "BundleUnitPriceSplitter.exe"
+& $Csc /nologo /target:winexe /optimize+ /out:$LauncherExe `
+    /win32icon:"$LauncherBuildDir\app-icon.ico" `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
-    /resource:"work\worker-dist\SplitterWorker.exe,SplitterWorker.exe" `
-    "DesktopApp.cs"
+    /resource:"$LauncherBuildDir\SplitterWorker.exe,SplitterWorker.exe" `
+    /resource:"$LauncherBuildDir\DefaultRatioData.xlsx,DefaultRatioData.xlsx" `
+    "$LauncherBuildDir\DesktopApp.cs"
 if ($LASTEXITCODE -ne 0) { throw "C# compiler failed with exit code $LASTEXITCODE" }
+$OutputExeName = (-join @(
+    [char]0x7EC4, [char]0x5408, [char]0x88C5, [char]0x5355, [char]0x4EF7,
+    [char]0x62C6, [char]0x5206, [char]0x5DE5, [char]0x5177
+)) + ".exe"
+$OutputExePath = Join-Path "outputs" $OutputExeName
+Copy-Item -LiteralPath $LauncherExe -Destination $OutputExePath -Force
 
-Write-Host "Built outputs\BundleUnitPriceSplitter_v3.exe"
+Write-Host "Built $OutputExePath"
