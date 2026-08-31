@@ -11,6 +11,7 @@ from splitter import (
     _enable_formula_recalculation,
     _freeze_cached_amounts,
     _round_two,
+    _sales_columns,
     process_workbooks,
     ratio_file_info,
     update_ratio_data,
@@ -87,6 +88,77 @@ def add_order_amounts(path: Path, amounts: list[tuple[str, float]]) -> None:
 
 
 class SplitterTests(unittest.TestCase):
+    def test_numeric_one_price_amount_headers_following_quantity_are_supported(self):
+        headers = [
+            "标记", "订单编号", "订单状态", "结算状态", "销售渠道", "处理时间", "付款时间", "发货仓库",
+            "物流公司", "物流单号", "网店订单号", "发货时间", "订单类型", "应收合计", "货品数量", "货品摘要",
+            "客户账号", "收货人", "手机", "收货地址", "合并备注", "条码", "货品编号", "货品名称", "数量", 1,
+            1, "生产日期", "货品批次", "备注", "规格", "优惠", "折扣", "锁定待发", "达人ID", "达人名称", "赠品",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ratio, sales, output = (
+                root / "ratio.xlsx",
+                root / "sales.xlsx",
+                root / "output.xlsx",
+            )
+            make_ratio(ratio)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售单合并货品"
+            ws.append(headers)
+            row = [""] * len(headers)
+            row[1] = "ORDER-1"
+            row[9] = "TRACKING-1"
+            row[10] = "WEB-1"
+            row[13] = 100
+            row[22] = "SKU1"
+            row[24] = 2
+            row[25] = 50
+            row[26] = 100
+            ws.append(row)
+            columns = _sales_columns(ws, 1)
+            self.assertEqual(columns.unit_price, 26)
+            self.assertEqual(columns.original_amount, 27)
+            wb.save(sales)
+            wb.close()
+
+            stats = process_workbooks(ratio, sales, output, charge_fee=False)
+
+            self.assertEqual(stats.orders, 1)
+            self.assertEqual(stats.exceptional_orders, 0)
+            result_book = load_workbook(output, data_only=True)
+            result = result_book["拆分结果"]
+            result_headers = [
+                result.cell(1, column).value
+                for column in range(1, result.max_column + 1)
+            ]
+            self.assertEqual(result.max_column, len(headers) + 5)
+            allocated_col = result_headers.index("摊后金额") + 1
+            self.assertEqual(result.cell(2, allocated_col).value, 100)
+            result_book.close()
+
+    def test_numeric_one_placeholders_without_standard_neighbor_are_rejected(self):
+        wb = Workbook()
+        ws = wb.active
+        ws.append(
+            [
+                "订单编号",
+                "物流单号",
+                "网店订单号",
+                "应收合计",
+                "货品编号",
+                "数量",
+                1,
+                1,
+                "其他字段",
+                "备注",
+            ]
+        )
+        with self.assertRaisesRegex(SplitterError, "金额.*单价|单价.*金额"):
+            _sales_columns(ws, 1)
+        wb.close()
+
     def test_round_two_uses_standard_half_up_rounding(self):
         self.assertEqual(_round_two(1.005), 1.01)
         self.assertEqual(_round_two(-1.005), -1.01)

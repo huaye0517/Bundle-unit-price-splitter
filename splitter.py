@@ -236,14 +236,38 @@ def _header_map(sheet, header_row: int) -> dict[str, int]:
 
 def _sales_columns(sheet, header_row: int) -> SalesColumns:
     headers = _header_map(sheet, header_row)
-    missing = SALES_REQUIRED_HEADERS.difference(headers)
-    if missing:
-        raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
     amount_columns = [
         column
         for column in range(1, sheet.max_column + 1)
         if _header_name(sheet.cell(header_row, column).value) == "金额"
     ]
+    unit_price = headers.get("单价")
+    original_amount = amount_columns[-1] if amount_columns else None
+    missing = SALES_REQUIRED_HEADERS.difference(headers)
+    if missing == {"单价", "金额"}:
+        quantity = headers.get("数量")
+        if quantity is not None:
+            placeholder_columns = (quantity + 1, quantity + 2)
+            placeholder_values = [
+                sheet.cell(header_row, column).value
+                for column in placeholder_columns
+            ]
+            placeholders_are_one = all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and float(value) == 1.0
+                for value in placeholder_values
+            )
+            follows_standard_layout = (
+                quantity + 3 <= sheet.max_column
+                and _header_name(sheet.cell(header_row, quantity + 3).value)
+                == "生产日期"
+            )
+            if placeholders_are_one and follows_standard_layout:
+                unit_price, original_amount = placeholder_columns
+                missing = set()
+    if missing:
+        raise SplitterError(f"销售表缺少字段：{'、'.join(sorted(missing))}")
     return SalesColumns(
         order_number=headers["订单编号"],
         logistics_number=headers["物流单号"],
@@ -251,11 +275,26 @@ def _sales_columns(sheet, header_row: int) -> SalesColumns:
         receivable=headers["应收合计"],
         item_code=headers["货品编号"],
         quantity=headers["数量"],
-        unit_price=headers["单价"],
-        original_amount=amount_columns[-1],
+        unit_price=unit_price,
+        original_amount=original_amount,
         note=headers["备注"],
         marker=headers.get("标记"),
     )
+
+
+def _find_sales_sheet(workbook):
+    matches = []
+    for sheet in workbook.worksheets:
+        for row_number in range(1, min(sheet.max_row, 5) + 1):
+            try:
+                _sales_columns(sheet, row_number)
+            except SplitterError:
+                continue
+            matches.append((sheet, row_number))
+            break
+    if matches:
+        return max(matches, key=lambda match: match[0].max_row)
+    return None, None
 
 
 def _ratio_sheet_info(workbook):
@@ -1551,7 +1590,7 @@ def process_workbooks(
         raise SplitterError(f"无法打开销售单：{exc}") from exc
 
     try:
-        source_sheet, header_row = _find_sheet(workbook, SALES_REQUIRED_HEADERS)
+        source_sheet, header_row = _find_sales_sheet(workbook)
         if source_sheet is None:
             raise SplitterError("销售单中未找到包含完整销售字段的明细工作表。")
         _freeze_cached_amounts(workbook, cached_workbook)
